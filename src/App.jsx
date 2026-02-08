@@ -22,6 +22,7 @@ import {
 import { getPageConfig, getPageConfigAsync, subscribePageConfig } from './lib/pageConfig';
 import { isSupabaseConfigured } from './lib/supabase';
 import { defaultConfig } from './lib/defaultConfig';
+import { generateText, isHuggingFaceConfigured } from './lib/huggingface';
 
 // --- BRANDING CONFIGURATION ---
 const BRAND_COLORS = {
@@ -39,8 +40,6 @@ const HopeAIModal = ({ onClose }) => {
   const [isPlaying, setIsPlaying] = useState(false);
   const audioRef = useRef(null);
 
-  const apiKey = import.meta.env.VITE_GEMINI_API_KEY || '';
-
   const generateEncouragement = async () => {
     if (!input.trim()) return;
     setIsLoading(true);
@@ -48,26 +47,19 @@ const HopeAIModal = ({ onClose }) => {
     setIsPlaying(false);
 
     try {
-      const systemPrompt =
-        'You are a compassionate, encouraging pastoral assistant for Hope City Highlands church. The user will share a feeling or situation. Your goal is to provide: 1. A short, comforting prayer (3-4 sentences). 2. A relevant Bible verse (NIV or ESV). Keep the tone hopeful, modern, and grace-filled. Do not be judgmental.';
+      const instruction =
+        'You are a compassionate, encouraging pastoral assistant for Hope City Highlands church. ' +
+        'Provide: 1. A short, comforting prayer (3-4 sentences). 2. A relevant Bible verse (NIV or ESV). ' +
+        'Keep the tone hopeful, modern, and grace-filled. Do not be judgmental.';
+      const prompt = `${instruction}\n\nUser shares: ${input.trim()}\n\nYour response:`;
 
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: `User input: ${input}` }] }],
-            systemInstruction: { parts: [{ text: systemPrompt }] },
-          }),
-        }
-      );
+      const result = await generateText(prompt, { maxNewTokens: 400 });
 
-      const data = await res.json();
-      const text =
-        data.candidates?.[0]?.content?.parts?.[0]?.text ||
-        "I'm having trouble connecting right now. Please try again.";
-      setResponse(text);
+      if (result.error) {
+        setResponse(`Sorry, ${result.error}`);
+      } else {
+        setResponse(result.text || "I'm having trouble connecting right now. Please try again.");
+      }
     } catch (error) {
       console.error(error);
       setResponse('Sorry, something went wrong. Please check your connection.');
@@ -179,7 +171,7 @@ const HopeAIModal = ({ onClose }) => {
                 </button>
               </div>
               <p className="text-[10px] text-gray-400 text-center">
-                This content is AI-generated using Gemini. Always seek counsel
+                This content is AI-generated. Always seek counsel
                 from our pastoral team for serious matters.
               </p>
             </div>
@@ -198,7 +190,7 @@ const HopeAIModal = ({ onClose }) => {
               />
               <button
                 onClick={generateEncouragement}
-                disabled={!input.trim() || isLoading || !apiKey}
+                disabled={!input.trim() || isLoading || !isHuggingFaceConfigured()}
                 className="absolute right-2 top-2 p-2 bg-teal-900 text-white rounded-lg hover:bg-teal-800 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
               >
                 {isLoading ? (
@@ -208,9 +200,9 @@ const HopeAIModal = ({ onClose }) => {
                 )}
               </button>
             </div>
-            {!apiKey && (
+            {!isHuggingFaceConfigured() && (
               <p className="text-xs text-amber-600 mt-2">
-                Add VITE_GEMINI_API_KEY to .env for AI prayers.
+                Add VITE_HUGGINGFACE_TOKEN to .env for AI prayers.
               </p>
             )}
           </div>

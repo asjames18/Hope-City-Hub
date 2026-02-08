@@ -1,6 +1,6 @@
 # Hope City Hub
 
-Mobile-first church hub for **Hope City Highlands** — connect, give, request prayer, and see upcoming events. Includes an optional AI assistant for personalized prayers (Gemini).
+Mobile-first church hub for **Hope City Highlands** — connect, give, request prayer, and see upcoming events. Includes an optional AI assistant for personalized prayers (Hugging Face).
 
 **Tagline:** Belong. Believe. Become.
 
@@ -22,7 +22,7 @@ Open [http://localhost:5173](http://localhost:5173).
 - **Announcement banner** — Dismissible top banner (e.g. Easter times).
 - **Primary actions** — I'm New / Connect, Give Online (Tithe.ly), Prayer Request (Elvanto forms).
 - **Upcoming events** — Cultural Sunday, Worship Night, Outreach with sign-up links.
-- **Hope AI Assistant** — Floating button opens a modal; users can share a need and get a short prayer + scripture (Gemini). Optional “Listen to Prayer” (TTS can be wired later).
+- **Hope AI Assistant** — Floating button opens a modal; users can share a need and get a short prayer + scripture (Hugging Face). Optional “Listen to Prayer” (TTS can be wired later).
 
 ---
 
@@ -63,12 +63,15 @@ Without these env vars, the app uses localStorage and PIN-based admin as before.
 
 ## AI prayers (optional)
 
-1. Get a [Gemini API key](https://aistudio.google.com/apikey).
+The Hope AI Assistant uses **Hugging Face Inference API** to generate a short prayer and scripture based on what the user shares.
+
+1. Create a [Hugging Face account](https://huggingface.co/join) and get an [access token](https://huggingface.co/settings/tokens) (read role is enough).
 2. Copy `.env.example` to `.env` and set:
    ```bash
-   VITE_GEMINI_API_KEY=your_key_here
+   VITE_HUGGINGFACE_TOKEN=your_token_here
    ```
-3. Restart the dev server. The Hope AI Assistant will use Gemini to generate prayers and scripture.
+3. (Optional) Use a different model: `VITE_HF_MODEL=mistralai/Mistral-7B-Instruct-v0.2` (default is `google/flan-t5-large`).
+4. Restart the dev server. Open the Hope AI Assistant (floating button) and share a need to get a prayer and verse.
 
 ---
 
