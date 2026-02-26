@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import {
   MapPin,
   Clock,
+  CalendarPlus,
   Heart,
   Users,
   Instagram,
@@ -23,6 +24,8 @@ import { getPageConfig, getPageConfigAsync, subscribePageConfig } from './lib/pa
 import { isSupabaseConfigured } from './lib/supabase';
 import { defaultConfig } from './lib/defaultConfig';
 import { generateText, isHuggingFaceConfigured } from './lib/huggingface';
+import { applySeo, removeStructuredData, setStructuredData } from './lib/seo';
+import { logClickEvent } from './lib/db';
 
 // --- BRANDING CONFIGURATION ---
 const BRAND_COLORS = {
@@ -202,7 +205,7 @@ const HopeAIModal = ({ onClose }) => {
             </div>
             {!isHuggingFaceConfigured() && (
               <p className="text-xs text-amber-600 mt-2">
-                Add VITE_HUGGINGFACE_TOKEN to .env for AI prayers.
+                Configure Supabase and deploy the hf-generate function to enable AI prayers.
               </p>
             )}
           </div>
@@ -214,13 +217,15 @@ const HopeAIModal = ({ onClose }) => {
 
 // --- COMPONENTS ---
 
-const AnnouncementBanner = ({ announcement }) => {
-  const [isVisible, setIsVisible] = useState(announcement?.active ?? true);
+const AnnouncementBanner = ({ announcement, onAnnouncementClick }) => {
+  const [isVisible, setIsVisible] = useState(Boolean(announcement?.active));
   // Sync visibility when config loads from Supabase (announcement.active can arrive after first mount)
   useEffect(() => {
     if (announcement?.active) setIsVisible(true);
   }, [announcement?.active]);
   if (!announcement?.active || !isVisible) return null;
+  const link = typeof announcement?.link === 'string' ? announcement.link.trim() : '';
+  const hasLink = link && link !== '#';
   return (
     <div
       className="relative px-4 py-3 pr-10 text-sm font-bold text-center text-white shadow-md animate-in slide-in-from-top"
@@ -231,7 +236,19 @@ const AnnouncementBanner = ({ announcement }) => {
     >
       <div className="flex items-center justify-center gap-2">
         <Info className="w-4 h-4" />
-        {announcement.text}
+        {hasLink ? (
+          <a
+            href={link}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={() => onAnnouncementClick?.(link)}
+            className="underline decoration-teal-700/50 underline-offset-2 hover:opacity-80"
+          >
+            {announcement.text}
+          </a>
+        ) : (
+          announcement.text
+        )}
       </div>
       <button
         onClick={() => setIsVisible(false)}
@@ -284,7 +301,7 @@ const ActionLink = ({
 
   const Component = href ? 'a' : 'button';
   const props = href
-    ? { href, target: '_blank', rel: 'noopener noreferrer' }
+    ? { href, target: '_blank', rel: 'noopener noreferrer', onClick }
     : { onClick };
 
   return (
@@ -325,15 +342,14 @@ const ActionLink = ({
   );
 };
 
-const EventRow = ({ event }) => (
-  <a
-    href={event.signupUrl || '#'}
-    target={event.signupUrl ? '_blank' : undefined}
-    rel={event.signupUrl ? 'noopener noreferrer' : undefined}
-    className={`block bg-white border border-gray-100 rounded-xl p-4 mb-3 shadow-sm transition-all ${event.signupUrl ? 'hover:shadow-md active:scale-[0.99]' : 'opacity-80 cursor-default'}`}
-    style={{ borderColor: event.signupUrl ? 'transparent' : '#f3f4f6' }}
-  >
-    <div className="flex items-center justify-between">
+const EventRow = ({ event }) => {
+  const calendarLink = buildCalendarLink(event);
+
+  return (
+    <div
+      className={`block bg-white border border-gray-100 rounded-xl p-4 mb-3 shadow-sm transition-all ${event.signupUrl ? 'hover:shadow-md' : 'opacity-90'}`}
+      style={{ borderColor: event.signupUrl ? 'transparent' : '#f3f4f6' }}
+    >
       <div className="flex items-center gap-4">
         <div
           className="flex flex-col items-center justify-center min-w-12 w-12 h-12 bg-gray-50 rounded-lg border border-gray-200"
@@ -358,7 +374,7 @@ const EventRow = ({ event }) => (
             );
           })()}
         </div>
-        <div>
+        <div className="flex-1">
           <h3
             className="font-bold leading-tight"
             style={{ color: BRAND_COLORS.teal }}
@@ -370,39 +386,213 @@ const EventRow = ({ event }) => (
           </div>
         </div>
       </div>
-      {event.signupUrl && (
-        <div
-          className="px-4 py-2 rounded-lg text-xs font-bold shadow-sm flex items-center text-white"
-          style={{ backgroundColor: BRAND_COLORS.lime }}
-        >
-          Sign Up
-        </div>
-      )}
+
+      <div className="mt-3 flex items-center gap-2">
+        {event.signupUrl && (
+          <a
+            href={event.signupUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="px-3 py-2 rounded-lg text-xs font-bold shadow-sm text-white inline-flex items-center"
+            style={{ backgroundColor: BRAND_COLORS.lime }}
+          >
+            Sign Up
+          </a>
+        )}
+
+        {calendarLink && (
+          <a
+            href={calendarLink.href}
+            download={calendarLink.filename}
+            className="px-3 py-2 rounded-lg text-xs font-bold border border-gray-200 text-gray-700 bg-white inline-flex items-center gap-1 hover:bg-gray-50"
+          >
+            <CalendarPlus className="w-3.5 h-3.5" /> Add to Calendar
+          </a>
+        )}
+      </div>
     </div>
-  </a>
-);
+  );
+};
+
+const MONTH_INDEX = {
+  jan: 0,
+  feb: 1,
+  mar: 2,
+  apr: 3,
+  may: 4,
+  jun: 5,
+  jul: 6,
+  aug: 7,
+  sep: 8,
+  oct: 9,
+  nov: 10,
+  dec: 11,
+};
+
+function parseEventStart(dateLabel, timeLabel) {
+  const dateMatch = String(dateLabel || '').trim().match(/^([A-Za-z]+)\s+(\d{1,2})$/);
+  if (!dateMatch) return null;
+
+  const month = MONTH_INDEX[dateMatch[1].slice(0, 3).toLowerCase()];
+  if (month == null) return null;
+
+  const day = Number(dateMatch[2]);
+  const timeText = String(timeLabel || '').trim();
+  const timeMatch = timeText.match(/^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)$/i);
+  const hasTime = !!timeMatch;
+
+  let hour = 12;
+  let minute = 0;
+  if (timeMatch) {
+    const hour12 = Number(timeMatch[1]);
+    minute = Number(timeMatch[2] || 0);
+    const meridiem = timeMatch[3].toUpperCase();
+    if (hour12 < 1 || hour12 > 12 || minute < 0 || minute > 59) return null;
+    hour = hour12 % 12;
+    if (meridiem === 'PM') hour += 12;
+  }
+
+  const now = new Date();
+  let year = now.getFullYear();
+  let start = new Date(year, month, day, hour, minute, 0, 0);
+  if (start.getTime() < now.getTime() - 24 * 60 * 60 * 1000) {
+    year += 1;
+    start = new Date(year, month, day, hour, minute, 0, 0);
+  }
+  return { start, hasTime };
+}
+
+function formatIcsUtc(date) {
+  return date.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
+}
+
+function buildCalendarLink(event) {
+  const parsed = parseEventStart(event?.date, event?.time);
+  if (!parsed) return null;
+  const { start, hasTime } = parsed;
+  const end = new Date(start.getTime() + (hasTime ? 90 : 24 * 60) * 60 * 1000);
+  const title = String(event?.title || 'Hope City Event');
+  const description = [
+    'Hope City Highlands event',
+    event?.signupUrl ? `Sign up: ${event.signupUrl}` : null,
+  ].filter(Boolean).join('\\n');
+
+  const dateOnly = start.toISOString().slice(0, 10).replace(/-/g, '');
+  const nextDateOnly = end.toISOString().slice(0, 10).replace(/-/g, '');
+
+  const ics = [
+    'BEGIN:VCALENDAR',
+    'VERSION:2.0',
+    'PRODID:-//Hope City Highlands//Event Calendar//EN',
+    'BEGIN:VEVENT',
+    `UID:${Date.now()}-${Math.random().toString(36).slice(2)}@hopecityhighlands.com`,
+    `DTSTAMP:${formatIcsUtc(new Date())}`,
+    hasTime ? `DTSTART:${formatIcsUtc(start)}` : `DTSTART;VALUE=DATE:${dateOnly}`,
+    hasTime ? `DTEND:${formatIcsUtc(end)}` : `DTEND;VALUE=DATE:${nextDateOnly}`,
+    `SUMMARY:${title.replace(/\n/g, ' ')}`,
+    `LOCATION:1700 Simpson Ave, Sebring, FL 33870`,
+    `DESCRIPTION:${description.replace(/\n/g, '\\n')}`,
+    'END:VEVENT',
+    'END:VCALENDAR',
+  ].join('\r\n');
+
+  return {
+    href: `data:text/calendar;charset=utf-8,${encodeURIComponent(ics)}`,
+    filename: `${title.toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'hope-city-event'}.ics`,
+  };
+}
 
 export default function App() {
   const [showAI, setShowAI] = useState(false);
+  const aiEnabled = import.meta.env.DEV;
+  const [showAllEvents, setShowAllEvents] = useState(false);
+  const [configReady, setConfigReady] = useState(false);
   // When Supabase is configured, start with default so we don't show stale localStorage; DB load will replace it
   const [config, setConfig] = useState(() =>
     isSupabaseConfigured() ? JSON.parse(JSON.stringify(defaultConfig)) : getPageConfig()
   );
   useEffect(() => {
-    getPageConfigAsync().then((c) => c != null && setConfig(c));
+    setConfigReady(false);
+    getPageConfigAsync()
+      .then((c) => c != null && setConfig(c))
+      .finally(() => setConfigReady(true));
     return subscribePageConfig((c) => c != null && setConfig(c));
   }, []);
 
+  useEffect(() => {
+    applySeo({
+      title: 'Hope City Highlands | Sebring, FL',
+      description:
+        'Hope City Highlands in Sebring, Florida. Join us to belong, believe, and become with worship, prayer, and community.',
+      canonicalPath: '/',
+      noindex: false,
+    });
+
+    const socialLinks = [config?.socials?.facebook, config?.socials?.instagram, config?.socials?.youtube]
+      .filter((url) => typeof url === 'string' && url.trim() && url !== '#');
+    const siteUrl = typeof window !== 'undefined' ? window.location.origin : 'https://hopecityhighlands.com';
+
+    setStructuredData('hope-city-org', {
+      '@context': 'https://schema.org',
+      '@graph': [
+        {
+          '@type': 'Organization',
+          name: 'Hope City Highlands',
+          url: siteUrl,
+          sameAs: socialLinks,
+        },
+        {
+          '@type': 'LocalBusiness',
+          name: 'Hope City Highlands',
+          url: siteUrl,
+          telephone: '',
+          address: {
+            '@type': 'PostalAddress',
+            streetAddress: '1700 Simpson Ave',
+            addressLocality: 'Sebring',
+            addressRegion: 'FL',
+            postalCode: '33870',
+            addressCountry: 'US',
+          },
+        },
+      ],
+    });
+
+    return () => removeStructuredData('hope-city-org');
+  }, [config?.socials?.facebook, config?.socials?.instagram, config?.socials?.youtube]);
+
   const links = config?.links ?? {};
   const socials = config?.socials ?? {};
-  const events = config?.events ?? [];
+  const events = configReady ? (config?.events ?? []) : [];
+  const visibleEvents = showAllEvents ? events : events.slice(0, 5);
+
+  useEffect(() => {
+    if (!configReady) return;
+    if (events.length <= 5) setShowAllEvents(false);
+  }, [configReady, events.length]);
+
+  const trackClick = (action, targetUrl, source = 'home', tag = '') => {
+    void logClickEvent({
+      action,
+      source,
+      tag,
+      targetUrl: targetUrl || '',
+      path: typeof window !== 'undefined' ? window.location.pathname : '/',
+      query: {},
+    });
+  };
 
   return (
     <div
       className="min-h-screen font-sans selection:bg-lime-100 pb-20"
       style={{ backgroundColor: BRAND_COLORS.gray }}
     >
-      <AnnouncementBanner announcement={config?.announcement} />
+      {configReady && config?.announcement?.active && (
+        <AnnouncementBanner
+          announcement={config?.announcement}
+          onAnnouncementClick={(url) => trackClick('announcement', url)}
+        />
+      )}
 
       <main className="max-w-md mx-auto px-4 py-8">
         {/* Header */}
@@ -425,12 +615,16 @@ export default function App() {
           <p className="text-sm text-gray-500 mt-2 font-medium">
             Belong. Believe. Become.
           </p>
+          <p className="text-sm text-gray-500 mt-2 font-medium">
+            Faith Forward
+          </p>
         </div>
 
         {/* Primary Actions */}
         <div className="mb-10">
           <ActionLink
             href={links.connectCard}
+            onClick={() => trackClick('connect', links.connectCard)}
             icon={Users}
             title="I'm New / Connect"
             subtitle="Digital connection card"
@@ -438,6 +632,7 @@ export default function App() {
           />
           <ActionLink
             href={links.giving}
+            onClick={() => trackClick('give', links.giving)}
             icon={CreditCard}
             title="Give Online"
             subtitle="Secure via Tithe.ly"
@@ -445,6 +640,7 @@ export default function App() {
           />
           <ActionLink
             href={links.prayerRequest}
+            onClick={() => trackClick('prayer', links.prayerRequest)}
             icon={Heart}
             title="Prayer Request"
             variant="white"
@@ -461,15 +657,18 @@ export default function App() {
         </div>
 
         <div className="mb-10">
-          {events.map((event) => (
+          {visibleEvents.map((event) => (
             <EventRow key={event.id} event={event} />
           ))}
-          <a
-            href="#"
-            className="block text-center text-xs font-bold text-gray-400 hover:opacity-80 mt-4 transition-colors"
-          >
-            View Full Calendar
-          </a>
+          {events.length > 5 && (
+            <button
+              type="button"
+              onClick={() => setShowAllEvents((v) => !v)}
+              className="block w-full text-center text-xs font-bold text-gray-500 hover:opacity-80 mt-4 transition-colors"
+            >
+              {showAllEvents ? 'Show Less Events' : `View All Events (${events.length})`}
+            </button>
+          )}
         </div>
 
         {/* Footer */}
@@ -498,6 +697,7 @@ export default function App() {
             href={links.directions}
             target="_blank"
             rel="noopener noreferrer"
+            onClick={() => trackClick('directions', links.directions)}
             className="flex items-center justify-center gap-1 text-xs font-bold text-gray-400 hover:opacity-80"
           >
             <MapPin className="w-3 h-3" /> 1700 Simpson Ave, Sebring, FL
@@ -511,27 +711,31 @@ export default function App() {
         </div>
       </main>
 
-      {/* Floating Bubble for AI */}
-      <button
-        onClick={() => setShowAI(true)}
-        className="fixed bottom-6 right-6 z-40 flex items-center justify-center w-16 h-16 rounded-full shadow-2xl hover:scale-105 transition-transform active:scale-95 animate-in zoom-in slide-in-from-bottom-10 duration-500"
-        style={{
-          background: `linear-gradient(135deg, ${BRAND_COLORS.teal} 0%, #00363d 100%)`,
-          boxShadow:
-            '0 10px 25px -5px rgba(0, 78, 89, 0.4), 0 8px 10px -6px rgba(0, 78, 89, 0.1)',
-        }}
-        aria-label="Open Hope AI Assistant"
-      >
-        <MessageCircle className="w-8 h-8 text-white fill-white/10" />
-        <div className="absolute top-3 right-3">
-          <span className="relative flex h-3 w-3">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-lime-400 opacity-75"></span>
-            <span className="relative inline-flex rounded-full h-3 w-3 bg-lime-500 border-2 border-teal-900"></span>
-          </span>
-        </div>
-      </button>
+      {aiEnabled && (
+        <>
+          {/* Floating Bubble for AI */}
+          <button
+            onClick={() => setShowAI(true)}
+            className="fixed bottom-6 right-6 z-40 flex items-center justify-center w-16 h-16 rounded-full shadow-2xl hover:scale-105 transition-transform active:scale-95 animate-in zoom-in slide-in-from-bottom-10 duration-500"
+            style={{
+              background: `linear-gradient(135deg, ${BRAND_COLORS.teal} 0%, #00363d 100%)`,
+              boxShadow:
+                '0 10px 25px -5px rgba(0, 78, 89, 0.4), 0 8px 10px -6px rgba(0, 78, 89, 0.1)',
+            }}
+            aria-label="Open Hope AI Assistant"
+          >
+            <MessageCircle className="w-8 h-8 text-white fill-white/10" />
+            <div className="absolute top-3 right-3">
+              <span className="relative flex h-3 w-3">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-lime-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-3 w-3 bg-lime-500 border-2 border-teal-900"></span>
+              </span>
+            </div>
+          </button>
 
-      {showAI && <HopeAIModal onClose={() => setShowAI(false)} />}
+          {showAI && <HopeAIModal onClose={() => setShowAI(false)} />}
+        </>
+      )}
     </div>
   );
 }

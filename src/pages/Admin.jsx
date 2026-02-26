@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Save,
@@ -12,104 +12,261 @@ import {
   Trash2,
   Loader2,
   UserPlus,
+  BarChart3,
+  AlertTriangle,
 } from 'lucide-react';
-import { getPageConfig, savePageConfig, notifyConfigUpdated } from '../lib/pageConfig';
-import { isSupabaseConfigured } from '../lib/supabase';
-import { supabase } from '../lib/supabase';
-import { fetchPageConfig, savePageConfigToDb } from '../lib/db';
+import { notifyConfigUpdated } from '../lib/pageConfig';
+import { isSupabaseConfigured, supabase } from '../lib/supabase';
+import {
+  CLICK_ACTIONS,
+  fetchClickSummary,
+  fetchPageConfig,
+  fetchRecentClickEvents,
+  savePageConfigToDb,
+} from '../lib/db';
 import { defaultConfig } from '../lib/defaultConfig';
 
-const ADMIN_PIN_KEY = 'hopeCity_adminPin';
-const DEFAULT_PIN = '1234';
+const RANGE_TO_DAYS = {
+  '24h': 1,
+  '7d': 7,
+  '30d': 30,
+};
 
-function getStoredPin() {
-  return typeof window !== 'undefined' ? localStorage.getItem(ADMIN_PIN_KEY) : null;
+const MONTH_INDEX = {
+  jan: 0,
+  feb: 1,
+  mar: 2,
+  apr: 3,
+  may: 4,
+  jun: 5,
+  jul: 6,
+  aug: 7,
+  sep: 8,
+  oct: 9,
+  nov: 10,
+  dec: 11,
+};
+
+function parseEventStart(dateLabel, timeLabel) {
+  const dateMatch = String(dateLabel || '').trim().match(/^([A-Za-z]+)\s+(\d{1,2})$/);
+  if (!dateMatch) return null;
+
+  const month = MONTH_INDEX[dateMatch[1].slice(0, 3).toLowerCase()];
+  if (month == null) return null;
+
+  const day = Number(dateMatch[2]);
+  const timeText = String(timeLabel || '').trim();
+  const timeMatch = timeText.match(/^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)$/i);
+
+  let hour = 23;
+  let minute = 59;
+  if (timeMatch) {
+    const hour12 = Number(timeMatch[1]);
+    minute = Number(timeMatch[2] || 0);
+    const meridiem = timeMatch[3].toUpperCase();
+    if (hour12 < 1 || hour12 > 12 || minute < 0 || minute > 59) return null;
+    hour = hour12 % 12;
+    if (meridiem === 'PM') hour += 12;
+  }
+
+  const now = new Date();
+  let year = now.getFullYear();
+  let start = new Date(year, month, day, hour, minute, 0, 0);
+  if (start.getTime() < now.getTime() - 24 * 60 * 60 * 1000) {
+    year += 1;
+    start = new Date(year, month, day, hour, minute, 0, 0);
+  }
+
+  return start;
 }
 
-function setStoredPin(pin) {
-  localStorage.setItem(ADMIN_PIN_KEY, pin);
+function isValidHttpUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+function isValidOptionalUrl(value, { allowHash = true } = {}) {
+  const text = String(value || '').trim();
+  if (!text) return true;
+  if (allowHash && text === '#') return true;
+  return isValidHttpUrl(text);
+}
+
+function normalizeConfig(input) {
+  return {
+    announcement: { ...defaultConfig.announcement, ...(input?.announcement || {}) },
+    links: { ...defaultConfig.links, ...(input?.links || {}) },
+    socials: { ...defaultConfig.socials, ...(input?.socials || {}) },
+    events: Array.isArray(input?.events) ? input.events : [],
+  };
+}
+
+function collectConfigIssues(config) {
+  const errors = {};
+  const warnings = {};
+
+  Object.entries(config?.links || {}).forEach(([key, value]) => {
+    if (!isValidOptionalUrl(value)) {
+      errors[`links.${key}`] = 'Use a valid http(s) URL, leave blank, or use #.';
+    }
+  });
+
+  Object.entries(config?.socials || {}).forEach(([key, value]) => {
+    if (!isValidOptionalUrl(value)) {
+      errors[`socials.${key}`] = 'Use a valid http(s) URL, leave blank, or use #.';
+    }
+  });
+
+  if (!isValidOptionalUrl(config?.announcement?.link)) {
+    errors['announcement.link'] = 'Use a valid http(s) URL, leave blank, or use #.';
+  }
+
+  (config?.events || []).forEach((event, index) => {
+    if (!String(event?.title || '').trim()) {
+      errors[`events.${index}.title`] = 'Title is required.';
+    }
+    if (!String(event?.date || '').trim()) {
+      errors[`events.${index}.date`] = 'Date is required.';
+    }
+    if (!String(event?.time || '').trim()) {
+      errors[`events.${index}.time`] = 'Time is required.';
+    }
+    if (!isValidOptionalUrl(event?.signupUrl)) {
+      errors[`events.${index}.signupUrl`] = 'Use a valid http(s) URL, leave blank, or use #.';
+    }
+
+    if (String(event?.date || '').trim() && String(event?.time || '').trim() && !parseEventStart(event?.date, event?.time)) {
+      warnings[`events.${index}.date`] = 'Date/time is valid for display, but cannot be parsed for cleanup/scheduling.';
+    }
+  });
+
+  return { errors, warnings, hasBlocking: Object.keys(errors).length > 0 };
 }
 
 export default function Admin() {
   const useDb = isSupabaseConfigured();
 
-  // PIN flow (when no Supabase)
-  const [pin, setPin] = useState('');
-  const [isSettingPin, setIsSettingPin] = useState(false);
-  const [newPin, setNewPin] = useState('');
-
-  // Supabase Auth (login only; no public sign-up)
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [authError, setAuthError] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
 
-  // Invite admin (only when using Supabase and logged in)
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteLoading, setInviteLoading] = useState(false);
   const [inviteMessage, setInviteMessage] = useState('');
 
   const [authenticated, setAuthenticated] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
-  const [config, setConfig] = useState(() => ({ ...defaultConfig, events: [...defaultConfig.events] }));
+  const [config, setConfig] = useState(() => normalizeConfig(defaultConfig));
+  const [baselineConfigJson, setBaselineConfigJson] = useState(() => JSON.stringify(normalizeConfig(defaultConfig)));
   const [configLoading, setConfigLoading] = useState(false);
+  const [saveLoading, setSaveLoading] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [lastSavedAt, setLastSavedAt] = useState(null);
   const [saveError, setSaveError] = useState('');
+  const [engagementRange, setEngagementRange] = useState('7d');
+  const [engagementLoading, setEngagementLoading] = useState(false);
+  const [engagementError, setEngagementError] = useState('');
+  const [engagementSummary, setEngagementSummary] = useState(null);
+  const [recentClickEvents, setRecentClickEvents] = useState([]);
 
-  // Initial auth check (Supabase session)
+  const validation = useMemo(() => collectConfigIssues(config), [config]);
+  const hasUnsavedChanges = useMemo(() => JSON.stringify(config) !== baselineConfigJson, [config, baselineConfigJson]);
+
   useEffect(() => {
     if (!useDb) {
       setAuthChecked(true);
-      const stored = getStoredPin();
-      if (!stored) setIsSettingPin(true);
       return;
     }
+
+    let active = true;
     supabase.auth.getSession().then(({ data: { session } }) => {
+      if (!active) return;
       setAuthenticated(!!session);
       setAuthChecked(true);
+      if (!session) setAuthError('Please log in to access admin.');
     });
+
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setAuthenticated(!!session);
+      if (!active) return;
+      const loggedIn = !!session;
+      setAuthenticated(loggedIn);
+      if (!loggedIn) {
+        setAuthError('Session expired. Please log in again.');
+        setInviteMessage('');
+      }
     });
-    return () => subscription?.unsubscribe();
+
+    return () => {
+      active = false;
+      subscription?.unsubscribe();
+    };
   }, [useDb]);
 
-  // Load config when authenticated
   useEffect(() => {
-    if (!authenticated) return;
+    if (!authenticated || !useDb) return;
+
     setConfigLoading(true);
-    if (useDb) {
-      fetchPageConfig().then((c) => {
-        if (c) setConfig(c);
+    fetchPageConfig()
+      .then((c) => {
+        if (!c) return;
+        const normalized = normalizeConfig(c);
+        setConfig(normalized);
+        setBaselineConfigJson(JSON.stringify(normalized));
+      })
+      .finally(() => {
         setConfigLoading(false);
-      }).catch(() => setConfigLoading(false));
-    } else {
-      setConfig(getPageConfig());
-      setConfigLoading(false);
-    }
+      });
   }, [authenticated, useDb]);
 
-  const handlePinLogin = (e) => {
-    e.preventDefault();
-    const stored = getStoredPin() || DEFAULT_PIN;
-    if (pin === stored) {
-      setAuthenticated(true);
-      setPin('');
-    } else {
-      alert('Incorrect PIN');
+  useEffect(() => {
+    if (!authenticated || !useDb) {
+      setEngagementSummary(null);
+      setRecentClickEvents([]);
+      return;
     }
-  };
 
-  const handleSetPin = (e) => {
-    e.preventDefault();
-    if (newPin.length >= 4) {
-      setStoredPin(newPin);
-      setNewPin('');
-      setIsSettingPin(false);
-    } else {
-      alert('PIN must be at least 4 characters');
-    }
-  };
+    const now = new Date();
+    const days = RANGE_TO_DAYS[engagementRange] ?? 7;
+    const from = new Date(now.getTime() - days * 24 * 60 * 60 * 1000).toISOString();
+    const to = now.toISOString();
+
+    setEngagementLoading(true);
+    setEngagementError('');
+
+    Promise.all([
+      fetchClickSummary({ from, to }),
+      fetchRecentClickEvents({ limit: 50, from, to }),
+    ])
+      .then(([summary, recent]) => {
+        if (!summary) {
+          setEngagementError('Unable to load click summary. Verify database migrations and your admin permissions.');
+        }
+        setEngagementSummary(summary);
+        setRecentClickEvents(recent);
+      })
+      .catch((err) => {
+        setEngagementError(err?.message || 'Failed to load engagement data');
+      })
+      .finally(() => {
+        setEngagementLoading(false);
+      });
+  }, [authenticated, useDb, engagementRange]);
+
+  useEffect(() => {
+    const onBeforeUnload = (event) => {
+      if (!hasUnsavedChanges) return;
+      event.preventDefault();
+      event.returnValue = '';
+    };
+
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [hasUnsavedChanges]);
 
   const handleSupabaseLogin = async (e) => {
     e.preventDefault();
@@ -117,20 +274,25 @@ export default function Admin() {
     setAuthLoading(true);
     const { error } = await supabase.auth.signInWithPassword({ email, password });
     setAuthLoading(false);
+
     if (error) {
       setAuthError(error.message);
       return;
     }
+
     setEmail('');
     setPassword('');
+    setInviteMessage('');
   };
 
   const handleInviteAdmin = async (e) => {
     e.preventDefault();
     const toEmail = inviteEmail.trim();
     if (!toEmail) return;
+
     setInviteMessage('');
     setInviteLoading(true);
+
     try {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session?.access_token) {
@@ -138,7 +300,8 @@ export default function Admin() {
         setInviteLoading(false);
         return;
       }
-      const url = import.meta.env.VITE_SUPABASE_URL?.replace(/\/$/, '') + '/functions/v1/invite-admin';
+
+      const url = `${import.meta.env.VITE_SUPABASE_URL?.replace(/\/$/, '')}/functions/v1/invite-admin`;
       const res = await fetch(url, {
         method: 'POST',
         headers: {
@@ -147,41 +310,60 @@ export default function Admin() {
         },
         body: JSON.stringify({ email: toEmail }),
       });
+
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         setInviteMessage(data?.error ?? data?.message ?? `Request failed (${res.status})`);
         setInviteLoading(false);
         return;
       }
+
       setInviteMessage(`Invitation sent to ${toEmail}. They can set their password from the email link.`);
       setInviteEmail('');
     } catch (err) {
       setInviteMessage(err?.message ?? 'Failed to send invite.');
     }
+
     setInviteLoading(false);
   };
 
   const handleLogout = () => {
-    if (useDb) supabase.auth.signOut();
+    if (hasUnsavedChanges && !window.confirm('You have unsaved changes. Log out anyway?')) {
+      return;
+    }
+    void supabase.auth.signOut();
     setAuthenticated(false);
   };
 
   const handleSave = async (e) => {
     e.preventDefault();
     setSaveError('');
-    if (useDb) {
-      const result = await savePageConfigToDb(config);
-      if (!result.ok) {
-        setSaveError(result.error || 'Save failed');
-        return;
-      }
-      notifyConfigUpdated();
-      const fresh = await fetchPageConfig();
-      if (fresh) setConfig(fresh);
-    } else {
-      savePageConfig(config);
+
+    if (validation.hasBlocking) {
+      setSaveError('Fix validation errors before saving.');
+      return;
     }
+
+    setSaveLoading(true);
+    const result = await savePageConfigToDb(config);
+    setSaveLoading(false);
+
+    if (!result.ok) {
+      setSaveError(result.error || 'Save failed');
+      return;
+    }
+
+    if (result.config) {
+      const normalized = normalizeConfig(result.config);
+      setConfig(normalized);
+      setBaselineConfigJson(JSON.stringify(normalized));
+    } else {
+      setBaselineConfigJson(JSON.stringify(config));
+    }
+
+    notifyConfigUpdated();
     setSaved(true);
+    setLastSavedAt(new Date());
     setTimeout(() => setSaved(false), 2000);
   };
 
@@ -195,86 +377,64 @@ export default function Admin() {
   const updateEvent = (index, field, value) => {
     setConfig((prev) => ({
       ...prev,
-      events: prev.events.map((e, i) =>
-        i === index ? { ...e, [field]: value } : e
-      ),
+      events: prev.events.map((event, i) => (i === index ? { ...event, [field]: value } : event)),
     }));
   };
 
   const addEvent = () => {
-    const tempId = useDb ? `temp-${Date.now()}` : Math.max(0, ...config.events.map((e) => (typeof e.id === 'number' ? e.id : 0))) + 1;
     setConfig((prev) => ({
       ...prev,
-      events: [...prev.events, { id: tempId, title: '', date: '', time: '', signupUrl: '' }],
+      events: [...(prev.events || []), { id: `temp-${Date.now()}`, title: '', date: '', time: '', signupUrl: '' }],
     }));
   };
 
   const removeEvent = (index) => {
-    if (config.events.length <= 1) return;
     setConfig((prev) => ({
       ...prev,
       events: prev.events.filter((_, i) => i !== index),
     }));
   };
 
-  // --- Set PIN (no Supabase, first time)
-  if (!useDb && isSettingPin && !getStoredPin()) {
-    return (
-      <div className="min-h-screen bg-gray-100 flex items-center justify-center p-4">
-        <form onSubmit={handleSetPin} className="bg-white rounded-2xl shadow-lg p-8 w-full max-w-sm">
-          <div className="flex items-center gap-2 mb-6">
-            <Lock className="w-6 h-6 text-teal-900" />
-            <h1 className="text-xl font-bold text-gray-900">Set Admin PIN</h1>
-          </div>
-          <p className="text-sm text-gray-500 mb-4">Choose a PIN (at least 4 characters) to protect the admin area.</p>
-          <input
-            type="password"
-            inputMode="numeric"
-            autoComplete="off"
-            placeholder="PIN"
-            value={newPin}
-            onChange={(e) => setNewPin(e.target.value.replace(/\D/g, '').slice(0, 8))}
-            className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-teal-500 focus:border-transparent"
-          />
-          <button type="submit" className="mt-4 w-full py-3 rounded-xl font-bold bg-teal-900 text-white hover:bg-teal-800">
-            Set PIN
-          </button>
-        </form>
-      </div>
-    );
-  }
+  const deletePastEvents = () => {
+    const now = new Date();
+    setConfig((prev) => ({
+      ...prev,
+      events: (prev.events || []).filter((event) => {
+        const start = parseEventStart(event?.date, event?.time);
+        if (!start) return true;
+        return start.getTime() >= now.getTime();
+      }),
+    }));
+  };
 
-  // --- PIN Login (no Supabase)
-  if (!useDb && !authenticated && getStoredPin()) {
+  if (!useDb) {
     return (
       <div className="min-h-screen bg-gray-100 flex items-center justify-center p-4">
-        <form onSubmit={handlePinLogin} className="bg-white rounded-2xl shadow-lg p-8 w-full max-w-sm">
-          <div className="flex items-center gap-2 mb-6">
-            <Lock className="w-6 h-6 text-teal-900" />
-            <h1 className="text-xl font-bold text-gray-900">Admin Login</h1>
+        <div className="bg-white rounded-2xl shadow-lg p-8 w-full max-w-md text-center">
+          <div className="w-12 h-12 rounded-full bg-amber-100 mx-auto mb-4 flex items-center justify-center">
+            <Lock className="w-6 h-6 text-amber-700" />
           </div>
-          <input
-            type="password"
-            inputMode="numeric"
-            autoComplete="off"
-            placeholder="PIN"
-            value={pin}
-            onChange={(e) => setPin(e.target.value.replace(/\D/g, '').slice(0, 8))}
-            className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-teal-500 focus:border-transparent mb-4"
-          />
-          <button type="submit" className="w-full py-3 rounded-xl font-bold bg-teal-900 text-white hover:bg-teal-800">
-            Log in
-          </button>
-          <Link to="/" className="block text-center text-sm text-gray-500 mt-4 hover:underline">
+          <h1 className="text-xl font-bold text-gray-900">Admin unavailable</h1>
+          <p className="text-sm text-gray-600 mt-3">
+            Admin requires Supabase configuration and authenticated sign-in. Set `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` to enable secure access.
+          </p>
+          <Link to="/" className="inline-block mt-5 text-sm font-semibold text-teal-900 hover:underline">
             Back to site
           </Link>
-        </form>
+        </div>
       </div>
     );
   }
 
-  // --- Supabase Login (no sign-up; first admin is created in Supabase Dashboard or via invite)
-  if (useDb && !authenticated) {
+  if (!authChecked) {
+    return (
+      <div className="min-h-screen bg-gray-100 flex items-center justify-center">
+        <Loader2 className="w-8 h-8 animate-spin text-teal-900" />
+      </div>
+    );
+  }
+
+  if (!authenticated) {
     return (
       <div className="min-h-screen bg-gray-100 flex items-center justify-center p-4">
         <div className="bg-white rounded-2xl shadow-lg p-8 w-full max-w-sm">
@@ -282,9 +442,7 @@ export default function Admin() {
             <Lock className="w-6 h-6 text-teal-900" />
             <h1 className="text-xl font-bold text-gray-900">Admin Login</h1>
           </div>
-          {authError && (
-            <p className="text-sm text-red-600 mb-4 bg-red-50 p-3 rounded-lg">{authError}</p>
-          )}
+          {authError && <p className="text-sm text-red-600 mb-4 bg-red-50 p-3 rounded-lg">{authError}</p>}
           <form onSubmit={handleSupabaseLogin} className="space-y-4">
             <input
               type="email"
@@ -319,41 +477,41 @@ export default function Admin() {
     );
   }
 
-  if (!authChecked) {
-    return (
-      <div className="min-h-screen bg-gray-100 flex items-center justify-center">
-        <Loader2 className="w-8 h-8 animate-spin text-teal-900" />
-      </div>
-    );
-  }
+  const errors = validation.errors;
+  const warnings = validation.warnings;
 
-  // --- Admin dashboard
   return (
     <div className="min-h-screen bg-gray-100 pb-24">
       <header className="sticky top-0 z-10 bg-white border-b border-gray-200 px-4 py-3 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <Link to="/" className="p-2 rounded-lg hover:bg-gray-100">
+          <Link
+            to="/"
+            onClick={(e) => {
+              if (hasUnsavedChanges && !window.confirm('You have unsaved changes. Leave this page?')) {
+                e.preventDefault();
+              }
+            }}
+            className="p-2 rounded-lg hover:bg-gray-100"
+          >
             <ArrowLeft className="w-5 h-5 text-gray-600" />
           </Link>
           <h1 className="font-bold text-lg text-gray-900">Page Admin</h1>
-          {useDb && (
-            <button
-              type="button"
-              onClick={handleLogout}
-              className="flex items-center gap-1 text-xs font-medium text-gray-500 hover:text-gray-700 ml-2"
-              title="Log out"
-            >
-              <LogOut className="w-4 h-4" />
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={handleLogout}
+            className="flex items-center gap-1 text-xs font-medium text-gray-500 hover:text-gray-700 ml-2"
+            title="Log out"
+          >
+            <LogOut className="w-4 h-4" />
+          </button>
         </div>
         <button
           onClick={handleSave}
-          disabled={configLoading}
+          disabled={configLoading || saveLoading}
           className="flex items-center gap-2 px-4 py-2 rounded-xl font-bold bg-teal-900 text-white hover:bg-teal-800 disabled:opacity-50"
         >
-          {configLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-          {saved ? 'Saved!' : 'Save'}
+          {(configLoading || saveLoading) ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+          {saved ? 'Saved!' : saveLoading ? 'Saving...' : 'Save'}
         </button>
       </header>
 
@@ -361,13 +519,24 @@ export default function Admin() {
         <div className="mx-4 mt-4 p-3 rounded-xl bg-red-50 text-red-700 text-sm">{saveError}</div>
       )}
 
+      {(hasUnsavedChanges || lastSavedAt || Object.keys(errors).length > 0) && (
+        <div className="mx-4 mt-4 p-3 rounded-xl bg-white border border-gray-200 text-xs text-gray-600 flex flex-wrap items-center gap-3">
+          {hasUnsavedChanges ? <span className="font-semibold text-amber-700">Unsaved changes</span> : <span className="font-semibold text-green-700">All changes saved</span>}
+          {lastSavedAt ? <span>Last saved: {lastSavedAt.toLocaleString()}</span> : null}
+          {Object.keys(errors).length > 0 ? (
+            <span className="inline-flex items-center gap-1 text-red-700">
+              <AlertTriangle className="w-3.5 h-3.5" /> {Object.keys(errors).length} validation error(s)
+            </span>
+          ) : null}
+        </div>
+      )}
+
       {configLoading ? (
         <div className="flex justify-center py-12">
           <Loader2 className="w-8 h-8 animate-spin text-teal-900" />
         </div>
       ) : (
-      <main className="max-w-lg mx-auto p-4 space-y-8">
-        {useDb && (
+        <main className="max-w-lg mx-auto p-4 space-y-8">
           <section className="bg-white rounded-2xl shadow-sm p-6">
             <h2 className="flex items-center gap-2 font-bold text-gray-900 mb-4">
               <UserPlus className="w-5 h-5 text-teal-900" />
@@ -399,137 +568,304 @@ export default function Admin() {
               </p>
             )}
           </section>
-        )}
 
-        <section className="bg-white rounded-2xl shadow-sm p-6">
-          <h2 className="flex items-center gap-2 font-bold text-gray-900 mb-4">
-            <Megaphone className="w-5 h-5 text-teal-900" />
-            Announcement Banner
-          </h2>
-          <label className="flex items-center gap-2 mb-4">
-            <input
-              type="checkbox"
-              checked={config.announcement?.active ?? false}
-              onChange={(e) => update('announcement', 'active', e.target.checked)}
-              className="rounded border-gray-300"
-            />
-            <span className="text-sm font-medium">Show banner</span>
-          </label>
-          <input
-            type="text"
-            placeholder="Banner text"
-            value={config.announcement?.text ?? ''}
-            onChange={(e) => update('announcement', 'text', e.target.value)}
-            className="w-full px-4 py-3 rounded-xl border border-gray-200 mb-3 focus:ring-2 focus:ring-teal-500"
-          />
-          <input
-            type="url"
-            placeholder="Link URL (optional)"
-            value={config.announcement?.link ?? ''}
-            onChange={(e) => update('announcement', 'link', e.target.value)}
-            className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-teal-500"
-          />
-        </section>
-
-        <section className="bg-white rounded-2xl shadow-sm p-6">
-          <h2 className="flex items-center gap-2 font-bold text-gray-900 mb-4">
-            <Link2 className="w-5 h-5 text-teal-900" />
-            Links
-          </h2>
-          {Object.entries(config.links || {}).map(([key, value]) => (
-            <div key={key} className="mb-3">
-              <label className="block text-xs font-medium text-gray-500 mb-1">
-                {key.replace(/([A-Z])/g, ' $1').trim()}
-              </label>
-              <input
-                type="url"
-                value={value ?? ''}
-                onChange={(e) => update('links', key, e.target.value)}
-                className="w-full px-4 py-2 rounded-lg border border-gray-200 focus:ring-2 focus:ring-teal-500 text-sm"
-              />
-            </div>
-          ))}
-        </section>
-
-        <section className="bg-white rounded-2xl shadow-sm p-6">
-          <h2 className="flex items-center gap-2 font-bold text-gray-900 mb-4">Social links</h2>
-          {Object.entries(config.socials || {}).map(([key, value]) => (
-            <div key={key} className="mb-3">
-              <label className="block text-xs font-medium text-gray-500 mb-1">{key}</label>
-              <input
-                type="url"
-                value={value ?? ''}
-                onChange={(e) => update('socials', key, e.target.value)}
-                className="w-full px-4 py-2 rounded-lg border border-gray-200 focus:ring-2 focus:ring-teal-500 text-sm"
-              />
-            </div>
-          ))}
-        </section>
-
-        <section className="bg-white rounded-2xl shadow-sm p-6">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="flex items-center gap-2 font-bold text-gray-900">
-              <Calendar className="w-5 h-5 text-teal-900" />
-              Upcoming Events
+          <section className="bg-white rounded-2xl shadow-sm p-6">
+            <h2 className="flex items-center gap-2 font-bold text-gray-900 mb-4">
+              <BarChart3 className="w-5 h-5 text-teal-900" />
+              Engagement
             </h2>
-            <button
-              type="button"
-              onClick={addEvent}
-              className="flex items-center gap-1 text-sm font-bold text-teal-900 hover:underline"
-            >
-              <Plus className="w-4 h-4" /> Add
-            </button>
-          </div>
-          <div className="space-y-4">
-            {(config.events || []).map((event, index) => (
-              <div key={event.id} className="p-4 rounded-xl border border-gray-200 space-y-3">
-                <div className="flex justify-between items-start">
-                  <span className="text-xs text-gray-400">#{index + 1}</span>
-                  <button
-                    type="button"
-                    onClick={() => removeEvent(index)}
-                    disabled={(config.events || []).length <= 1}
-                    className="p-1 text-red-500 hover:bg-red-50 rounded disabled:opacity-30"
-                    aria-label="Remove event"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                </div>
-                <input
-                  type="text"
-                  placeholder="Event title"
-                  value={event.title ?? ''}
-                  onChange={(e) => updateEvent(index, 'title', e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg border border-gray-200 text-sm focus:ring-2 focus:ring-teal-500"
-                />
-                <div className="grid grid-cols-2 gap-2">
-                  <input
-                    type="text"
-                    placeholder="Date (e.g. Feb 22 or Sundays)"
-                    value={event.date ?? ''}
-                    onChange={(e) => updateEvent(index, 'date', e.target.value)}
-                    className="px-3 py-2 rounded-lg border border-gray-200 text-sm focus:ring-2 focus:ring-teal-500"
-                  />
-                  <input
-                    type="text"
-                    placeholder="Time"
-                    value={event.time ?? ''}
-                    onChange={(e) => updateEvent(index, 'time', e.target.value)}
-                    className="px-3 py-2 rounded-lg border border-gray-200 text-sm focus:ring-2 focus:ring-teal-500"
-                  />
-                </div>
-                <input
-                  type="url"
-                  placeholder="Sign-up URL (optional)"
-                  value={event.signupUrl ?? ''}
-                  onChange={(e) => updateEvent(index, 'signupUrl', e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg border border-gray-200 text-sm focus:ring-2 focus:ring-teal-500"
-                />
+
+            <div className="flex gap-2 mb-4">
+              {['24h', '7d', '30d'].map((range) => (
+                <button
+                  key={range}
+                  type="button"
+                  onClick={() => setEngagementRange(range)}
+                  className={`px-3 py-1.5 text-xs font-bold rounded-lg border ${
+                    engagementRange === range
+                      ? 'bg-teal-900 text-white border-teal-900'
+                      : 'bg-white text-gray-600 border-gray-200'
+                  }`}
+                >
+                  {range}
+                </button>
+              ))}
+            </div>
+
+            {engagementError && (
+              <div className="mb-4 p-3 rounded-xl bg-red-50 text-red-700 text-sm">{engagementError}</div>
+            )}
+
+            {engagementLoading ? (
+              <div className="flex justify-center py-6">
+                <Loader2 className="w-6 h-6 animate-spin text-teal-900" />
               </div>
-            ))}
-          </div>
-        </section>
-      </main>
+            ) : (
+              <>
+                <div className="grid grid-cols-2 gap-3 mb-5">
+                  <div className="rounded-xl border border-gray-200 p-3">
+                    <p className="text-xs text-gray-500">Total clicks</p>
+                    <p className="text-2xl font-extrabold text-teal-900">{engagementSummary?.total ?? 0}</p>
+                  </div>
+                  <div className="rounded-xl border border-gray-200 p-3">
+                    <p className="text-xs text-gray-500">Top source</p>
+                    <p className="text-sm font-bold text-teal-900 truncate">
+                      {engagementSummary?.topSources?.[0]?.label ?? 'n/a'}
+                    </p>
+                    <p className="text-xs text-gray-500">
+                      {engagementSummary?.topSources?.[0]?.count ?? 0} clicks
+                    </p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3 mb-5">
+                  {CLICK_ACTIONS.map((action) => (
+                    <div key={action} className="rounded-xl border border-gray-200 p-3">
+                      <p className="text-xs text-gray-500 capitalize">{action}</p>
+                      <p className="text-xl font-bold text-gray-900">
+                        {engagementSummary?.byAction?.[action] ?? 0}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="grid grid-cols-2 gap-3 mb-5">
+                  <div className="rounded-xl border border-gray-200 p-3">
+                    <p className="text-xs font-bold text-gray-700 mb-2">Top sources</p>
+                    {(engagementSummary?.topSources?.length ?? 0) === 0 ? (
+                      <p className="text-xs text-gray-500">No data</p>
+                    ) : (
+                      <div className="space-y-1">
+                        {(engagementSummary?.topSources ?? []).map((item) => (
+                          <div key={item.label} className="text-xs text-gray-700 flex justify-between gap-2">
+                            <span className="truncate">{item.label}</span>
+                            <span className="font-semibold">{item.count}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <div className="rounded-xl border border-gray-200 p-3">
+                    <p className="text-xs font-bold text-gray-700 mb-2">Top tags</p>
+                    {(engagementSummary?.topTags?.length ?? 0) === 0 ? (
+                      <p className="text-xs text-gray-500">No data</p>
+                    ) : (
+                      <div className="space-y-1">
+                        {(engagementSummary?.topTags ?? []).map((item) => (
+                          <div key={item.label} className="text-xs text-gray-700 flex justify-between gap-2">
+                            <span className="truncate">{item.label}</span>
+                            <span className="font-semibold">{item.count}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div>
+                  <p className="text-xs font-bold text-gray-700 mb-2">Recent events</p>
+                  <div className="overflow-x-auto rounded-xl border border-gray-200">
+                    <table className="w-full text-xs">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="text-left p-2 font-semibold text-gray-600">Time</th>
+                          <th className="text-left p-2 font-semibold text-gray-600">Action</th>
+                          <th className="text-left p-2 font-semibold text-gray-600">Source</th>
+                          <th className="text-left p-2 font-semibold text-gray-600">Tag</th>
+                          <th className="text-left p-2 font-semibold text-gray-600">Target</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {recentClickEvents.length === 0 ? (
+                          <tr>
+                            <td className="p-3 text-gray-500" colSpan={5}>No click events in this range.</td>
+                          </tr>
+                        ) : (
+                          recentClickEvents.map((event, idx) => (
+                            <tr key={`${event.createdAt}-${idx}`} className="border-t border-gray-100">
+                              <td className="p-2 text-gray-600 whitespace-nowrap">
+                                {event.createdAt ? new Date(event.createdAt).toLocaleString() : 'n/a'}
+                              </td>
+                              <td className="p-2 text-gray-800">{event.action || 'n/a'}</td>
+                              <td className="p-2 text-gray-800">{event.source || 'unknown'}</td>
+                              <td className="p-2 text-gray-800">{event.tag || '-'}</td>
+                              <td className="p-2 text-gray-600 max-w-[160px] truncate" title={event.targetUrl || ''}>
+                                {event.targetUrl || '-'}
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </>
+            )}
+          </section>
+
+          <section className="bg-white rounded-2xl shadow-sm p-6">
+            <h2 className="flex items-center gap-2 font-bold text-gray-900 mb-4">
+              <Megaphone className="w-5 h-5 text-teal-900" />
+              Announcement Banner
+            </h2>
+            <label className="flex items-center gap-2 mb-4">
+              <input
+                type="checkbox"
+                checked={config.announcement?.active ?? false}
+                onChange={(e) => update('announcement', 'active', e.target.checked)}
+                className="rounded border-gray-300"
+              />
+              <span className="text-sm font-medium">Show banner</span>
+            </label>
+            <input
+              type="text"
+              placeholder="Banner text"
+              value={config.announcement?.text ?? ''}
+              onChange={(e) => update('announcement', 'text', e.target.value)}
+              className="w-full px-4 py-3 rounded-xl border border-gray-200 mb-3 focus:ring-2 focus:ring-teal-500"
+            />
+            <input
+              type="url"
+              placeholder="Link URL (optional)"
+              value={config.announcement?.link ?? ''}
+              onChange={(e) => update('announcement', 'link', e.target.value)}
+              className={`w-full px-4 py-3 rounded-xl border focus:ring-2 focus:ring-teal-500 ${errors['announcement.link'] ? 'border-red-300 bg-red-50' : 'border-gray-200'}`}
+            />
+            {errors['announcement.link'] && <p className="mt-2 text-xs text-red-600">{errors['announcement.link']}</p>}
+          </section>
+
+          <section className="bg-white rounded-2xl shadow-sm p-6">
+            <h2 className="flex items-center gap-2 font-bold text-gray-900 mb-4">
+              <Link2 className="w-5 h-5 text-teal-900" />
+              Links
+            </h2>
+            {Object.entries(config.links || {}).map(([key, value]) => {
+              const fieldKey = `links.${key}`;
+              return (
+                <div key={key} className="mb-3">
+                  <label className="block text-xs font-medium text-gray-500 mb-1">
+                    {key.replace(/([A-Z])/g, ' $1').trim()}
+                  </label>
+                  <input
+                    type="url"
+                    value={value ?? ''}
+                    onChange={(e) => update('links', key, e.target.value)}
+                    className={`w-full px-4 py-2 rounded-lg border focus:ring-2 focus:ring-teal-500 text-sm ${errors[fieldKey] ? 'border-red-300 bg-red-50' : 'border-gray-200'}`}
+                  />
+                  {errors[fieldKey] && <p className="mt-1 text-xs text-red-600">{errors[fieldKey]}</p>}
+                </div>
+              );
+            })}
+          </section>
+
+          <section className="bg-white rounded-2xl shadow-sm p-6">
+            <h2 className="flex items-center gap-2 font-bold text-gray-900 mb-4">Social links</h2>
+            {Object.entries(config.socials || {}).map(([key, value]) => {
+              const fieldKey = `socials.${key}`;
+              return (
+                <div key={key} className="mb-3">
+                  <label className="block text-xs font-medium text-gray-500 mb-1">{key}</label>
+                  <input
+                    type="url"
+                    value={value ?? ''}
+                    onChange={(e) => update('socials', key, e.target.value)}
+                    className={`w-full px-4 py-2 rounded-lg border focus:ring-2 focus:ring-teal-500 text-sm ${errors[fieldKey] ? 'border-red-300 bg-red-50' : 'border-gray-200'}`}
+                  />
+                  {errors[fieldKey] && <p className="mt-1 text-xs text-red-600">{errors[fieldKey]}</p>}
+                </div>
+              );
+            })}
+          </section>
+
+          <section className="bg-white rounded-2xl shadow-sm p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="flex items-center gap-2 font-bold text-gray-900">
+                <Calendar className="w-5 h-5 text-teal-900" />
+                Upcoming Events
+              </h2>
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={deletePastEvents}
+                  className="text-xs font-semibold text-red-600 hover:underline"
+                >
+                  Delete Past
+                </button>
+                <button
+                  type="button"
+                  onClick={addEvent}
+                  className="flex items-center gap-1 text-sm font-bold text-teal-900 hover:underline"
+                >
+                  <Plus className="w-4 h-4" /> Add
+                </button>
+              </div>
+            </div>
+            <div className="space-y-4">
+              {(config.events || []).map((event, index) => {
+                const titleError = errors[`events.${index}.title`];
+                const dateError = errors[`events.${index}.date`];
+                const dateWarning = warnings[`events.${index}.date`];
+                const timeError = errors[`events.${index}.time`];
+                const signupError = errors[`events.${index}.signupUrl`];
+
+                return (
+                  <div key={event.id || `event-${index}`} className="p-4 rounded-xl border border-gray-200 space-y-3">
+                    <div className="flex justify-between items-start">
+                      <span className="text-xs text-gray-400">#{index + 1}</span>
+                      <button
+                        type="button"
+                        onClick={() => removeEvent(index)}
+                        className="p-1 text-red-500 hover:bg-red-50 rounded"
+                        aria-label="Remove event"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                    <input
+                      type="text"
+                      placeholder="Event title"
+                      value={event.title ?? ''}
+                      onChange={(e) => updateEvent(index, 'title', e.target.value)}
+                      className={`w-full px-3 py-2 rounded-lg border text-sm focus:ring-2 focus:ring-teal-500 ${titleError ? 'border-red-300 bg-red-50' : 'border-gray-200'}`}
+                    />
+                    {titleError && <p className="text-xs text-red-600">{titleError}</p>}
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <input
+                          type="text"
+                          placeholder="Date (e.g. Feb 22 or Sundays)"
+                          value={event.date ?? ''}
+                          onChange={(e) => updateEvent(index, 'date', e.target.value)}
+                          className={`w-full px-3 py-2 rounded-lg border text-sm focus:ring-2 focus:ring-teal-500 ${dateError ? 'border-red-300 bg-red-50' : dateWarning ? 'border-amber-300 bg-amber-50' : 'border-gray-200'}`}
+                        />
+                        {dateError && <p className="mt-1 text-xs text-red-600">{dateError}</p>}
+                        {!dateError && dateWarning && <p className="mt-1 text-xs text-amber-700">{dateWarning}</p>}
+                      </div>
+                      <div>
+                        <input
+                          type="text"
+                          placeholder="Time"
+                          value={event.time ?? ''}
+                          onChange={(e) => updateEvent(index, 'time', e.target.value)}
+                          className={`w-full px-3 py-2 rounded-lg border text-sm focus:ring-2 focus:ring-teal-500 ${timeError ? 'border-red-300 bg-red-50' : 'border-gray-200'}`}
+                        />
+                        {timeError && <p className="mt-1 text-xs text-red-600">{timeError}</p>}
+                      </div>
+                    </div>
+                    <input
+                      type="url"
+                      placeholder="Sign-up URL (optional)"
+                      value={event.signupUrl ?? ''}
+                      onChange={(e) => updateEvent(index, 'signupUrl', e.target.value)}
+                      className={`w-full px-3 py-2 rounded-lg border text-sm focus:ring-2 focus:ring-teal-500 ${signupError ? 'border-red-300 bg-red-50' : 'border-gray-200'}`}
+                    />
+                    {signupError && <p className="text-xs text-red-600">{signupError}</p>}
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        </main>
       )}
     </div>
   );

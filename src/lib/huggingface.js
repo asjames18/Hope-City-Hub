@@ -1,68 +1,65 @@
 /**
- * Hugging Face Inference API for text generation.
- * Used by the Hope AI Assistant for prayers and scripture.
- * Get a token at https://huggingface.co/settings/tokens (read role is enough for inference).
+ * Hugging Face generation is proxied through Supabase Edge Function to avoid browser CORS
+ * and to keep the token server-side.
  */
 
-const INFERENCE_URL = 'https://api-inference.huggingface.co/models';
+function getFunctionUrl() {
+  const base = import.meta.env.VITE_SUPABASE_URL?.trim()?.replace(/\/$/, '');
+  return base ? `${base}/functions/v1/hf-generate` : '';
+}
 
 export function isHuggingFaceConfigured() {
-  return !!(import.meta.env.VITE_HUGGINGFACE_TOKEN?.trim());
+  return !!(import.meta.env.VITE_SUPABASE_URL?.trim() && import.meta.env.VITE_SUPABASE_ANON_KEY?.trim());
 }
 
 /**
- * Generate text from a prompt using the Inference API.
- * @param {string} prompt - Full prompt (instruction + user input)
- * @param {object} options - { model?: string, maxNewTokens?: number }
+ * Generate text from prompt via Supabase Edge Function proxy.
+ * @param {string} prompt
+ * @param {object} options { model?: string, maxNewTokens?: number }
  * @returns {Promise<{ text: string } | { error: string }>}
  */
 export async function generateText(prompt, options = {}) {
-  const token = import.meta.env.VITE_HUGGINGFACE_TOKEN?.trim();
-  const model =
-    import.meta.env.VITE_HF_MODEL?.trim() ||
-    'google/flan-t5-large';
+  const functionUrl = getFunctionUrl();
+  const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY?.trim();
+  const model = import.meta.env.VITE_HF_MODEL?.trim() || 'HuggingFaceTB/SmolLM3-3B';
   const maxNewTokens = options.maxNewTokens ?? 400;
 
-  if (!token) {
-    return { error: 'Hugging Face token not configured' };
+  if (!functionUrl || !anonKey) {
+    return { error: 'AI proxy not configured. Add Supabase URL/anon key and deploy hf-generate function.' };
   }
 
   try {
-    const res = await fetch(`${INFERENCE_URL}/${model}`, {
+    const res = await fetch(functionUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
+        apikey: anonKey,
+        Authorization: `Bearer ${anonKey}`,
       },
       body: JSON.stringify({
-        inputs: prompt,
-        parameters: {
-          max_new_tokens: maxNewTokens,
-          return_full_text: false,
-        },
+        prompt,
+        model,
+        maxNewTokens,
       }),
     });
 
-    const data = await res.json();
-
-    if (!res.ok) {
-      const msg =
-        data?.error ??
-        (typeof data === 'string' ? data : null) ??
-        `Request failed (${res.status})`;
-      if (res.status === 503 && (msg.includes('loading') || msg.includes('Loading'))) {
-        return { error: 'Model is loading. Please try again in 15–20 seconds.' };
-      }
-      return { error: msg };
+    const raw = await res.text();
+    let data = null;
+    try {
+      data = raw ? JSON.parse(raw) : null;
+    } catch {
+      data = null;
     }
 
-    // Response shape: array with { generated_text: "..." } or single object
-    const first = Array.isArray(data) ? data[0] : data;
-    const text = first?.generated_text ?? '';
+    if (!res.ok) {
+      return { error: data?.error || raw || `Request failed (${res.status})` };
+    }
+
+    const text = data?.text;
     const trimmed = typeof text === 'string' ? text.trim() : '';
     return trimmed ? { text: trimmed } : { error: 'No text generated' };
   } catch (err) {
-    console.error('Hugging Face inference error:', err);
-    return { error: err?.message ?? 'Network error' };
+    console.error('AI proxy error:', err);
+    return { error: err?.message || 'Network error' };
   }
 }
