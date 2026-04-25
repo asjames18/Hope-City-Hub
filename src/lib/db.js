@@ -12,21 +12,36 @@ const ADMIN_AUTHZ_ERROR =
 let supportsPublicPageConfigRpc = true;
 let supportsPublicPageConfigMetaRpc = true;
 
-function normalizeConfigPayload(row, eventRows) {
+function getOwnValue(object, key) {
+  return Object.prototype.hasOwnProperty.call(object || {}, key) ? object[key] : undefined;
+}
+
+function normalizeConfigPayload(row, eventRows, fallbackEvents = []) {
   return normalizePageConfig({
     announcement: row?.announcement ?? defaultConfig.announcement,
     links: row?.links ?? defaultConfig.links,
     socials: row?.socials ?? defaultConfig.socials,
-    events: (eventRows || []).map((e) => ({
-      id: e.id,
-      title: e.title ?? '',
-      date: e.date ?? '',
-      time: e.time ?? '',
-      location: e.location ?? '',
-      locationName: e.location_name ?? e.locationName ?? '',
-      locationAddress: e.location_address ?? e.locationAddress ?? e.location ?? '',
-      signupUrl: e.signup_url ?? '',
-    })),
+    events: (eventRows || []).map((e, index) => {
+      const fallback = fallbackEvents[index] || {};
+      const locationName =
+        getOwnValue(e, 'location_name') ?? getOwnValue(e, 'locationName') ??
+        getOwnValue(fallback, 'location_name') ?? getOwnValue(fallback, 'locationName') ?? '';
+      const locationAddress =
+        getOwnValue(e, 'location_address') ?? getOwnValue(e, 'locationAddress') ??
+        getOwnValue(fallback, 'location_address') ?? getOwnValue(fallback, 'locationAddress') ??
+        getOwnValue(e, 'location') ?? '';
+
+      return {
+        id: e.id,
+        title: e.title ?? '',
+        date: e.date ?? '',
+        time: e.time ?? '',
+        location: e.location ?? formatEventLocation({ locationName, locationAddress }),
+        locationName,
+        locationAddress,
+        signupUrl: e.signup_url ?? '',
+      };
+    }),
   });
 }
 
@@ -185,7 +200,7 @@ export async function savePageConfigToDb(config) {
       return { ok: false, error: error.message };
     }
 
-    const normalized = normalizeConfigPayload(data?.site_config, data?.events);
+    const normalized = normalizeConfigPayload(data?.site_config, data?.events, events);
     return { ok: true, config: normalized };
   } catch (err) {
     console.warn('savePageConfigToDb error:', err);
