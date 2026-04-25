@@ -1,11 +1,12 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { CreditCard, Heart, MapPin, Users, ChevronRight } from 'lucide-react';
-import { defaultConfig } from '../lib/defaultConfig';
-import { getPageConfigAsync, subscribePageConfig } from '../lib/pageConfig';
+import PWAInstallPrompt from '../components/PWAInstallPrompt.jsx';
+import { getPageConfig, getPageConfigAsync, subscribePageConfig } from '../lib/pageConfig';
 import { applySeo } from '../lib/seo';
 import { logClickEvent } from '../lib/db';
 import { isSupabaseConfigured } from '../lib/supabase';
+import { getExternalHref, getSiteIconUrl } from '../lib/siteConfig';
 
 const BRAND_COLORS = {
   teal: '#004E59',
@@ -20,7 +21,7 @@ function normalizeAction(value) {
 
 export default function Tap() {
   const [searchParams] = useSearchParams();
-  const [config, setConfig] = useState(() => JSON.parse(JSON.stringify(defaultConfig)));
+  const [config, setConfig] = useState(() => getPageConfig());
 
   useEffect(() => {
     getPageConfigAsync().then((c) => c != null && setConfig(c));
@@ -28,13 +29,16 @@ export default function Tap() {
   }, []);
 
   useEffect(() => {
+    const currentSiteIconUrl = getSiteIconUrl(config);
     applySeo({
       title: 'Quick Actions | Hope City Highlands',
       description: 'Quick links for Connect, Give, Prayer Request, and Directions at Hope City Highlands.',
       canonicalPath: '/tap',
+      ogImagePath: currentSiteIconUrl,
+      iconPath: currentSiteIconUrl,
       noindex: true,
     });
-  }, []);
+  }, [config]);
 
   const selectedAction = normalizeAction(searchParams.get('action'));
   const source = (searchParams.get('source') || 'unknown').trim().slice(0, 100);
@@ -42,11 +46,12 @@ export default function Tap() {
   const queryObject = useMemo(() => Object.fromEntries(searchParams.entries()), [searchParams]);
 
   const links = config?.links ?? {};
+  const siteIconUrl = getSiteIconUrl(config);
   const actions = [
-    { key: 'connect', title: "I'm New / Connect", subtitle: 'Digital connection card', href: links.connectCard, icon: Users },
-    { key: 'give', title: 'Give Online', subtitle: 'Secure via Tithe.ly', href: links.giving, icon: CreditCard },
-    { key: 'prayer', title: 'Prayer Request', subtitle: 'Share your prayer need', href: links.prayerRequest, icon: Heart },
-    { key: 'directions', title: 'Get Directions', subtitle: '1700 Simpson Ave, Sebring, FL', href: links.directions, icon: MapPin },
+    { key: 'connect', title: "I'm New / Connect", subtitle: 'Digital connection card', href: getExternalHref(links.connectCard), icon: Users },
+    { key: 'give', title: 'Give Online', subtitle: 'Secure via Tithe.ly', href: getExternalHref(links.giving), icon: CreditCard },
+    { key: 'prayer', title: 'Prayer Request', subtitle: 'Share your prayer need', href: getExternalHref(links.prayerRequest), icon: Heart },
+    { key: 'directions', title: 'Get Directions', subtitle: '1700 Simpson Ave, Sebring, FL', href: getExternalHref(links.directions), icon: MapPin },
   ];
 
   const trackClick = (action, targetUrl) => {
@@ -61,10 +66,15 @@ export default function Tap() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-50 px-4 py-8">
-      <main className="max-w-md mx-auto">
+    <div className="min-h-screen bg-gray-50 px-4 py-6 pb-[calc(2rem+env(safe-area-inset-bottom))] sm:py-8">
+      <main className="mx-auto max-w-md">
         <div className="text-center mb-8">
-          <h1 className="text-2xl font-extrabold tracking-tight text-teal-900">Hope City Highlands</h1>
+          <img
+            src={siteIconUrl}
+            alt="Hope City Highlands icon"
+            className="mx-auto mb-4 h-12 w-12 rounded-xl shadow-xl"
+          />
+          <h1 className="text-2xl font-extrabold tracking-tight text-teal-900 sm:text-3xl">Hope City Highlands</h1>
           <p className="text-sm text-gray-600 mt-2">Quick actions for your next step.</p>
           {!isSupabaseConfigured() && (
             <p className="text-xs text-amber-700 mt-2">
@@ -90,7 +100,8 @@ export default function Tap() {
                   }
                   trackClick(key, href);
                 }}
-                className={`block rounded-2xl border-2 p-5 bg-white shadow-sm transition ${isSelected ? 'ring-2' : 'hover:shadow-md'} ${isDisabled ? 'opacity-60 cursor-not-allowed' : ''}`}
+                aria-disabled={isDisabled}
+                className={`block rounded-2xl border-2 bg-white p-4 shadow-sm transition sm:p-5 ${isSelected ? 'ring-2' : 'hover:shadow-md'} ${isDisabled ? 'cursor-not-allowed opacity-60' : ''}`}
                 style={{
                   borderColor: isSelected ? BRAND_COLORS.lime : '#e5e7eb',
                   boxShadow: isSelected ? '0 0 0 1px rgba(163, 214, 0, 0.2)' : undefined,
@@ -112,6 +123,10 @@ export default function Tap() {
               </a>
             );
           })}
+        </div>
+
+        <div className="mt-6">
+          <PWAInstallPrompt />
         </div>
 
         <div className="text-center mt-8">

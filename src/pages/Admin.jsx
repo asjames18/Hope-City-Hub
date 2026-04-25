@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Save,
@@ -14,17 +14,20 @@ import {
   UserPlus,
   BarChart3,
   AlertTriangle,
+  Image as ImageIcon,
 } from 'lucide-react';
 import { notifyConfigUpdated } from '../lib/pageConfig';
 import { isSupabaseConfigured, supabase } from '../lib/supabase';
 import {
   CLICK_ACTIONS,
+  fetchRecentAIChats,
   fetchClickSummary,
   fetchPageConfig,
   fetchRecentClickEvents,
   savePageConfigToDb,
 } from '../lib/db';
-import { defaultConfig } from '../lib/defaultConfig';
+import { parseEventDateTime } from '../lib/events';
+import { cloneDefaultConfig, getSiteIconUrl, normalizePageConfig } from '../lib/siteConfig';
 
 const RANGE_TO_DAYS = {
   '24h': 1,
@@ -32,53 +35,30 @@ const RANGE_TO_DAYS = {
   '30d': 30,
 };
 
-const MONTH_INDEX = {
-  jan: 0,
-  feb: 1,
-  mar: 2,
-  apr: 3,
-  may: 4,
-  jun: 5,
-  jul: 6,
-  aug: 7,
-  sep: 8,
-  oct: 9,
-  nov: 10,
-  dec: 11,
+const AI_INTENT_LABELS = {
+  prayer: 'Prayer',
+  church_info: 'Church Info',
+  care_support: 'Care Support',
+  urgent_support: 'Urgent Support',
+  general: 'General',
 };
 
-function parseEventStart(dateLabel, timeLabel) {
-  const dateMatch = String(dateLabel || '').trim().match(/^([A-Za-z]+)\s+(\d{1,2})$/);
-  if (!dateMatch) return null;
+const LINK_LABELS = {
+  connectCard: 'Connect card',
+  prayerRequest: 'Prayer request',
+  giving: 'Giving',
+  baptism: 'Baptism',
+  dreamTeam: 'Dream team',
+  directions: 'Directions',
+  youtube: 'YouTube',
+};
 
-  const month = MONTH_INDEX[dateMatch[1].slice(0, 3).toLowerCase()];
-  if (month == null) return null;
-
-  const day = Number(dateMatch[2]);
-  const timeText = String(timeLabel || '').trim();
-  const timeMatch = timeText.match(/^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)$/i);
-
-  let hour = 23;
-  let minute = 59;
-  if (timeMatch) {
-    const hour12 = Number(timeMatch[1]);
-    minute = Number(timeMatch[2] || 0);
-    const meridiem = timeMatch[3].toUpperCase();
-    if (hour12 < 1 || hour12 > 12 || minute < 0 || minute > 59) return null;
-    hour = hour12 % 12;
-    if (meridiem === 'PM') hour += 12;
-  }
-
-  const now = new Date();
-  let year = now.getFullYear();
-  let start = new Date(year, month, day, hour, minute, 0, 0);
-  if (start.getTime() < now.getTime() - 24 * 60 * 60 * 1000) {
-    year += 1;
-    start = new Date(year, month, day, hour, minute, 0, 0);
-  }
-
-  return start;
-}
+const SOCIAL_LABELS = {
+  website: 'Website',
+  instagram: 'Instagram',
+  facebook: 'Facebook',
+  youtube: 'YouTube',
+};
 
 function isValidHttpUrl(value) {
   try {
@@ -94,15 +74,6 @@ function isValidOptionalUrl(value, { allowHash = true } = {}) {
   if (!text) return true;
   if (allowHash && text === '#') return true;
   return isValidHttpUrl(text);
-}
-
-function normalizeConfig(input) {
-  return {
-    announcement: { ...defaultConfig.announcement, ...(input?.announcement || {}) },
-    links: { ...defaultConfig.links, ...(input?.links || {}) },
-    socials: { ...defaultConfig.socials, ...(input?.socials || {}) },
-    events: Array.isArray(input?.events) ? input.events : [],
-  };
 }
 
 function collectConfigIssues(config) {
@@ -139,7 +110,11 @@ function collectConfigIssues(config) {
       errors[`events.${index}.signupUrl`] = 'Use a valid http(s) URL, leave blank, or use #.';
     }
 
-    if (String(event?.date || '').trim() && String(event?.time || '').trim() && !parseEventStart(event?.date, event?.time)) {
+    if (
+      String(event?.date || '').trim()
+      && String(event?.time || '').trim()
+      && !parseEventDateTime(event?.date, event?.time, { defaultHour: 23, defaultMinute: 59 })
+    ) {
       warnings[`events.${index}.date`] = 'Date/time is valid for display, but cannot be parsed for cleanup/scheduling.';
     }
   });
@@ -161,8 +136,8 @@ export default function Admin() {
 
   const [authenticated, setAuthenticated] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
-  const [config, setConfig] = useState(() => normalizeConfig(defaultConfig));
-  const [baselineConfigJson, setBaselineConfigJson] = useState(() => JSON.stringify(normalizeConfig(defaultConfig)));
+  const [config, setConfig] = useState(() => cloneDefaultConfig());
+  const [baselineConfigJson, setBaselineConfigJson] = useState(() => JSON.stringify(cloneDefaultConfig()));
   const [configLoading, setConfigLoading] = useState(false);
   const [saveLoading, setSaveLoading] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -173,6 +148,7 @@ export default function Admin() {
   const [engagementError, setEngagementError] = useState('');
   const [engagementSummary, setEngagementSummary] = useState(null);
   const [recentClickEvents, setRecentClickEvents] = useState([]);
+  const [recentAIChats, setRecentAIChats] = useState([]);
 
   const validation = useMemo(() => collectConfigIssues(config), [config]);
   const hasUnsavedChanges = useMemo(() => JSON.stringify(config) !== baselineConfigJson, [config, baselineConfigJson]);
@@ -214,7 +190,7 @@ export default function Admin() {
     fetchPageConfig()
       .then((c) => {
         if (!c) return;
-        const normalized = normalizeConfig(c);
+        const normalized = normalizePageConfig(c);
         setConfig(normalized);
         setBaselineConfigJson(JSON.stringify(normalized));
       })
@@ -227,6 +203,7 @@ export default function Admin() {
     if (!authenticated || !useDb) {
       setEngagementSummary(null);
       setRecentClickEvents([]);
+      setRecentAIChats([]);
       return;
     }
 
@@ -241,13 +218,15 @@ export default function Admin() {
     Promise.all([
       fetchClickSummary({ from, to }),
       fetchRecentClickEvents({ limit: 50, from, to }),
+      fetchRecentAIChats({ limit: 25, from, to }),
     ])
-      .then(([summary, recent]) => {
+      .then(([summary, recent, chats]) => {
         if (!summary) {
           setEngagementError('Unable to load click summary. Verify database migrations and your admin permissions.');
         }
         setEngagementSummary(summary);
         setRecentClickEvents(recent);
+        setRecentAIChats(chats);
       })
       .catch((err) => {
         setEngagementError(err?.message || 'Failed to load engagement data');
@@ -353,15 +332,15 @@ export default function Admin() {
       return;
     }
 
+    const nextConfig = result.config ? normalizePageConfig(result.config) : config;
     if (result.config) {
-      const normalized = normalizeConfig(result.config);
-      setConfig(normalized);
-      setBaselineConfigJson(JSON.stringify(normalized));
+      setConfig(nextConfig);
+      setBaselineConfigJson(JSON.stringify(nextConfig));
     } else {
       setBaselineConfigJson(JSON.stringify(config));
     }
 
-    notifyConfigUpdated();
+    notifyConfigUpdated(nextConfig);
     setSaved(true);
     setLastSavedAt(new Date());
     setTimeout(() => setSaved(false), 2000);
@@ -384,7 +363,7 @@ export default function Admin() {
   const addEvent = () => {
     setConfig((prev) => ({
       ...prev,
-      events: [...(prev.events || []), { id: `temp-${Date.now()}`, title: '', date: '', time: '', signupUrl: '' }],
+      events: [...(prev.events || []), { id: `temp-${Date.now()}`, title: '', date: '', time: '', location: '', signupUrl: '' }],
     }));
   };
 
@@ -400,9 +379,9 @@ export default function Admin() {
     setConfig((prev) => ({
       ...prev,
       events: (prev.events || []).filter((event) => {
-        const start = parseEventStart(event?.date, event?.time);
-        if (!start) return true;
-        return start.getTime() >= now.getTime();
+        const parsed = parseEventDateTime(event?.date, event?.time, { defaultHour: 23, defaultMinute: 59 });
+        if (!parsed) return true;
+        return parsed.start.getTime() >= now.getTime();
       }),
     }));
   };
@@ -479,11 +458,13 @@ export default function Admin() {
 
   const errors = validation.errors;
   const warnings = validation.warnings;
+  const siteIconUrl = getSiteIconUrl(config);
 
   return (
-    <div className="min-h-screen bg-gray-100 pb-24">
-      <header className="sticky top-0 z-10 bg-white border-b border-gray-200 px-4 py-3 flex items-center justify-between">
-        <div className="flex items-center gap-3">
+    <div className="min-h-screen bg-gray-100 pb-[calc(6rem+env(safe-area-inset-bottom))]">
+      <header className="sticky top-0 z-10 border-b border-gray-200 bg-white px-4 py-3">
+        <div className="mx-auto flex w-full max-w-xl flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-center gap-3">
           <Link
             to="/"
             onClick={(e) => {
@@ -496,23 +477,24 @@ export default function Admin() {
             <ArrowLeft className="w-5 h-5 text-gray-600" />
           </Link>
           <h1 className="font-bold text-lg text-gray-900">Page Admin</h1>
+            <button
+              type="button"
+              onClick={handleLogout}
+              className="ml-2 flex items-center gap-1 text-xs font-medium text-gray-500 hover:text-gray-700"
+              title="Log out"
+            >
+              <LogOut className="w-4 h-4" />
+            </button>
+          </div>
           <button
-            type="button"
-            onClick={handleLogout}
-            className="flex items-center gap-1 text-xs font-medium text-gray-500 hover:text-gray-700 ml-2"
-            title="Log out"
+            onClick={handleSave}
+            disabled={configLoading || saveLoading}
+            className="flex w-full items-center justify-center gap-2 rounded-xl bg-teal-900 px-4 py-3 font-bold text-white hover:bg-teal-800 disabled:opacity-50 sm:w-auto"
           >
-            <LogOut className="w-4 h-4" />
+            {(configLoading || saveLoading) ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+            {saved ? 'Saved!' : saveLoading ? 'Saving...' : 'Save'}
           </button>
         </div>
-        <button
-          onClick={handleSave}
-          disabled={configLoading || saveLoading}
-          className="flex items-center gap-2 px-4 py-2 rounded-xl font-bold bg-teal-900 text-white hover:bg-teal-800 disabled:opacity-50"
-        >
-          {(configLoading || saveLoading) ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-          {saved ? 'Saved!' : saveLoading ? 'Saving...' : 'Save'}
-        </button>
       </header>
 
       {saveError && (
@@ -536,8 +518,34 @@ export default function Admin() {
           <Loader2 className="w-8 h-8 animate-spin text-teal-900" />
         </div>
       ) : (
-        <main className="max-w-lg mx-auto p-4 space-y-8">
-          <section className="bg-white rounded-2xl shadow-sm p-6">
+        <main className="mx-auto w-full max-w-xl space-y-6 p-4 sm:space-y-8">
+          <section className="rounded-2xl bg-white p-4 shadow-sm sm:p-6">
+            <h2 className="flex items-center gap-2 font-bold text-gray-900 mb-4">
+              <ImageIcon className="w-5 h-5 text-teal-900" />
+              Branding
+            </h2>
+            <div className="mb-4 flex items-center gap-3 rounded-xl border border-gray-200 p-3">
+              <img
+                src={siteIconUrl}
+                alt="Current Hope City Highlands icon"
+                className="h-12 w-12 rounded-xl bg-teal-900 object-cover"
+              />
+              <div>
+                <p className="text-sm font-bold text-gray-900">Website icon</p>
+                <p className="text-xs text-gray-500">Leave blank to use the built-in Hope City icon.</p>
+              </div>
+            </div>
+            <input
+              type="url"
+              placeholder="Icon image URL (optional)"
+              value={config.links?.iconUrl ?? ''}
+              onChange={(e) => update('links', 'iconUrl', e.target.value)}
+              className={`w-full px-4 py-3 rounded-xl border focus:ring-2 focus:ring-teal-500 ${errors['links.iconUrl'] ? 'border-red-300 bg-red-50' : 'border-gray-200'}`}
+            />
+            {errors['links.iconUrl'] && <p className="mt-2 text-xs text-red-600">{errors['links.iconUrl']}</p>}
+          </section>
+
+          <section className="rounded-2xl bg-white p-4 shadow-sm sm:p-6">
             <h2 className="flex items-center gap-2 font-bold text-gray-900 mb-4">
               <UserPlus className="w-5 h-5 text-teal-900" />
               Add admin
@@ -545,18 +553,18 @@ export default function Admin() {
             <p className="text-sm text-gray-500 mb-4">
               Invite another admin by email. They will receive a link to set their password and sign in.
             </p>
-            <form onSubmit={handleInviteAdmin} className="flex gap-2">
+            <form onSubmit={handleInviteAdmin} className="flex flex-col gap-2 sm:flex-row">
               <input
                 type="email"
                 placeholder="admin@example.com"
                 value={inviteEmail}
                 onChange={(e) => setInviteEmail(e.target.value)}
-                className="flex-1 px-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-teal-500 text-sm"
+                className="flex-1 rounded-xl border border-gray-200 px-4 py-3 text-sm focus:ring-2 focus:ring-teal-500"
               />
               <button
                 type="submit"
                 disabled={inviteLoading || !inviteEmail.trim()}
-                className="px-4 py-3 rounded-xl font-bold bg-teal-900 text-white hover:bg-teal-800 disabled:opacity-50 flex items-center gap-2"
+                className="flex items-center justify-center gap-2 rounded-xl bg-teal-900 px-4 py-3 font-bold text-white hover:bg-teal-800 disabled:opacity-50 sm:w-auto"
               >
                 {inviteLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <UserPlus className="w-4 h-4" />}
                 Send invite
@@ -569,13 +577,13 @@ export default function Admin() {
             )}
           </section>
 
-          <section className="bg-white rounded-2xl shadow-sm p-6">
+          <section className="rounded-2xl bg-white p-4 shadow-sm sm:p-6">
             <h2 className="flex items-center gap-2 font-bold text-gray-900 mb-4">
               <BarChart3 className="w-5 h-5 text-teal-900" />
               Engagement
             </h2>
 
-            <div className="flex gap-2 mb-4">
+            <div className="mb-4 flex flex-wrap gap-2">
               {['24h', '7d', '30d'].map((range) => (
                 <button
                   key={range}
@@ -602,7 +610,7 @@ export default function Admin() {
               </div>
             ) : (
               <>
-                <div className="grid grid-cols-2 gap-3 mb-5">
+                <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <div className="rounded-xl border border-gray-200 p-3">
                     <p className="text-xs text-gray-500">Total clicks</p>
                     <p className="text-2xl font-extrabold text-teal-900">{engagementSummary?.total ?? 0}</p>
@@ -618,7 +626,7 @@ export default function Admin() {
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 gap-3 mb-5">
+                <div className="mb-5 grid grid-cols-2 gap-3">
                   {CLICK_ACTIONS.map((action) => (
                     <div key={action} className="rounded-xl border border-gray-200 p-3">
                       <p className="text-xs text-gray-500 capitalize">{action}</p>
@@ -629,7 +637,7 @@ export default function Admin() {
                   ))}
                 </div>
 
-                <div className="grid grid-cols-2 gap-3 mb-5">
+                <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <div className="rounded-xl border border-gray-200 p-3">
                     <p className="text-xs font-bold text-gray-700 mb-2">Top sources</p>
                     {(engagementSummary?.topSources?.length ?? 0) === 0 ? (
@@ -664,7 +672,24 @@ export default function Admin() {
 
                 <div>
                   <p className="text-xs font-bold text-gray-700 mb-2">Recent events</p>
-                  <div className="overflow-x-auto rounded-xl border border-gray-200">
+                  <div className="space-y-2 sm:hidden">
+                    {recentClickEvents.length === 0 ? (
+                      <div className="rounded-xl border border-gray-200 bg-white p-3 text-xs text-gray-500">
+                        No click events in this range.
+                      </div>
+                    ) : (
+                      recentClickEvents.map((event, idx) => (
+                        <div key={`${event.createdAt}-${idx}`} className="rounded-xl border border-gray-200 bg-white p-3 text-xs text-gray-700">
+                          <p><span className="font-semibold text-gray-900">Time:</span> {event.createdAt ? new Date(event.createdAt).toLocaleString() : 'n/a'}</p>
+                          <p><span className="font-semibold text-gray-900">Action:</span> {event.action || 'n/a'}</p>
+                          <p><span className="font-semibold text-gray-900">Source:</span> {event.source || 'unknown'}</p>
+                          <p><span className="font-semibold text-gray-900">Tag:</span> {event.tag || '-'}</p>
+                          <p className="break-all"><span className="font-semibold text-gray-900">Target:</span> {event.targetUrl || '-'}</p>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                  <div className="hidden overflow-x-auto rounded-xl border border-gray-200 sm:block">
                     <table className="w-full text-xs">
                       <thead className="bg-gray-50">
                         <tr>
@@ -699,11 +724,81 @@ export default function Admin() {
                     </table>
                   </div>
                 </div>
+
+                <div className="mt-5">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <p className="text-xs font-bold text-gray-700">Recent AI chats</p>
+                    <p className="text-[11px] text-gray-500">Admin-only. These may contain sensitive prayer requests or support questions and are retained for 30 days.</p>
+                  </div>
+                  <div className="space-y-2">
+                    {recentAIChats.length === 0 ? (
+                      <div className="rounded-xl border border-gray-200 bg-white p-3 text-xs text-gray-500">
+                        No AI chat activity in this range.
+                      </div>
+                    ) : (
+                      recentAIChats.map((chat, idx) => (
+                        <details
+                          key={`${chat.createdAt}-${idx}`}
+                          className="rounded-xl border border-gray-200 bg-white p-3"
+                        >
+                          <summary className="cursor-pointer list-none">
+                            <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                              <div className="min-w-0">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-bold ${
+                                    chat.success ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'
+                                  }`}>
+                                    {chat.success ? 'Success' : 'Error'}
+                                  </span>
+                                  <span className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">
+                                    {chat.provider || 'unknown provider'}
+                                  </span>
+                                  {chat.intent ? (
+                                    <span className="rounded-full bg-teal-50 px-2 py-0.5 text-[11px] font-bold text-teal-700">
+                                      {AI_INTENT_LABELS[chat.intent] || 'Unknown'}
+                                    </span>
+                                  ) : null}
+                                  {chat.model ? (
+                                    <span className="text-[11px] text-gray-500">{chat.model}</span>
+                                  ) : null}
+                                </div>
+                                <p className="mt-2 text-sm font-semibold text-gray-900">
+                                  {chat.prompt || 'No prompt recorded'}
+                                </p>
+                                <p className="mt-1 text-[11px] text-gray-500">
+                                  {chat.createdAt ? new Date(chat.createdAt).toLocaleString() : 'n/a'}
+                                  {chat.path ? ` · ${chat.path}` : ''}
+                                </p>
+                              </div>
+                              <span className="text-xs font-semibold text-teal-900">View transcript</span>
+                            </div>
+                          </summary>
+                          <div className="mt-3 space-y-3 border-t border-gray-100 pt-3 text-xs text-gray-700">
+                            <div>
+                              <p className="mb-1 font-bold text-gray-900">User prompt</p>
+                              <p className="whitespace-pre-wrap rounded-lg bg-gray-50 p-3">{chat.prompt || 'n/a'}</p>
+                            </div>
+                            <div>
+                              <p className="mb-1 font-bold text-gray-900">{chat.success ? 'AI response' : 'Error'}</p>
+                              <p className={`whitespace-pre-wrap rounded-lg p-3 ${chat.success ? 'bg-lime-50 text-teal-900' : 'bg-red-50 text-red-700'}`}>
+                                {chat.success ? (chat.response || 'No response recorded') : (chat.error || 'Unknown error')}
+                              </p>
+                            </div>
+                            <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-gray-500">
+                              <span>Origin: {chat.origin || 'n/a'}</span>
+                              <span>Path: {chat.path || 'n/a'}</span>
+                            </div>
+                          </div>
+                        </details>
+                      ))
+                    )}
+                  </div>
+                </div>
               </>
             )}
           </section>
 
-          <section className="bg-white rounded-2xl shadow-sm p-6">
+          <section className="rounded-2xl bg-white p-4 shadow-sm sm:p-6">
             <h2 className="flex items-center gap-2 font-bold text-gray-900 mb-4">
               <Megaphone className="w-5 h-5 text-teal-900" />
               Announcement Banner
@@ -734,17 +829,17 @@ export default function Admin() {
             {errors['announcement.link'] && <p className="mt-2 text-xs text-red-600">{errors['announcement.link']}</p>}
           </section>
 
-          <section className="bg-white rounded-2xl shadow-sm p-6">
+          <section className="rounded-2xl bg-white p-4 shadow-sm sm:p-6">
             <h2 className="flex items-center gap-2 font-bold text-gray-900 mb-4">
               <Link2 className="w-5 h-5 text-teal-900" />
               Links
             </h2>
-            {Object.entries(config.links || {}).map(([key, value]) => {
+            {Object.entries(config.links || {}).filter(([key]) => key !== 'iconUrl').map(([key, value]) => {
               const fieldKey = `links.${key}`;
               return (
                 <div key={key} className="mb-3">
                   <label className="block text-xs font-medium text-gray-500 mb-1">
-                    {key.replace(/([A-Z])/g, ' $1').trim()}
+                    {LINK_LABELS[key] || key.replace(/([A-Z])/g, ' $1').trim()}
                   </label>
                   <input
                     type="url"
@@ -758,13 +853,13 @@ export default function Admin() {
             })}
           </section>
 
-          <section className="bg-white rounded-2xl shadow-sm p-6">
+          <section className="rounded-2xl bg-white p-4 shadow-sm sm:p-6">
             <h2 className="flex items-center gap-2 font-bold text-gray-900 mb-4">Social links</h2>
             {Object.entries(config.socials || {}).map(([key, value]) => {
               const fieldKey = `socials.${key}`;
               return (
                 <div key={key} className="mb-3">
-                  <label className="block text-xs font-medium text-gray-500 mb-1">{key}</label>
+                  <label className="block text-xs font-medium text-gray-500 mb-1">{SOCIAL_LABELS[key] || key}</label>
                   <input
                     type="url"
                     value={value ?? ''}
@@ -777,13 +872,13 @@ export default function Admin() {
             })}
           </section>
 
-          <section className="bg-white rounded-2xl shadow-sm p-6">
-            <div className="flex items-center justify-between mb-4">
+          <section className="rounded-2xl bg-white p-4 shadow-sm sm:p-6">
+            <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <h2 className="flex items-center gap-2 font-bold text-gray-900">
                 <Calendar className="w-5 h-5 text-teal-900" />
                 Upcoming Events
               </h2>
-              <div className="flex items-center gap-3">
+              <div className="flex flex-wrap items-center gap-3">
                 <button
                   type="button"
                   onClick={deletePastEvents}
@@ -829,7 +924,7 @@ export default function Admin() {
                       className={`w-full px-3 py-2 rounded-lg border text-sm focus:ring-2 focus:ring-teal-500 ${titleError ? 'border-red-300 bg-red-50' : 'border-gray-200'}`}
                     />
                     {titleError && <p className="text-xs text-red-600">{titleError}</p>}
-                    <div className="grid grid-cols-2 gap-2">
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                       <div>
                         <input
                           type="text"
@@ -852,6 +947,13 @@ export default function Admin() {
                         {timeError && <p className="mt-1 text-xs text-red-600">{timeError}</p>}
                       </div>
                     </div>
+                    <input
+                      type="text"
+                      placeholder="Location / address (opens GPS when clicked)"
+                      value={event.location ?? ''}
+                      onChange={(e) => updateEvent(index, 'location', e.target.value)}
+                      className="w-full px-3 py-2 rounded-lg border border-gray-200 text-sm focus:ring-2 focus:ring-teal-500"
+                    />
                     <input
                       type="url"
                       placeholder="Sign-up URL (optional)"

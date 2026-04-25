@@ -27,7 +27,7 @@ function upsertMeta(key, value, content, isProperty = false) {
 }
 
 function upsertLink(rel, href) {
-  if (typeof document === 'undefined') return;
+  if (typeof document === 'undefined') return null;
   let link = document.head.querySelector(`link[rel="${rel}"]`);
   if (!link) {
     link = document.createElement('link');
@@ -35,6 +35,7 @@ function upsertLink(rel, href) {
     document.head.appendChild(link);
   }
   link.setAttribute('href', href);
+  return link;
 }
 
 export function applySeo({
@@ -42,6 +43,7 @@ export function applySeo({
   description = DEFAULT_DESCRIPTION,
   canonicalPath = '/',
   ogImagePath = '/favicon.svg',
+  iconPath = '/favicon.svg',
   noindex = false,
 } = {}) {
   if (typeof document === 'undefined') return;
@@ -65,6 +67,17 @@ export function applySeo({
   upsertMeta('twitter:image', 'content', ogImage);
 
   upsertLink('canonical', canonicalUrl);
+  const iconLink = upsertLink('icon', iconPath);
+  if (iconLink) {
+    if (iconPath.endsWith('.svg')) {
+      iconLink.setAttribute('type', 'image/svg+xml');
+    } else if (iconPath.endsWith('.png')) {
+      iconLink.setAttribute('type', 'image/png');
+    } else {
+      iconLink.removeAttribute('type');
+    }
+  }
+  upsertLink('apple-touch-icon', iconPath);
 }
 
 export function setStructuredData(id, data) {

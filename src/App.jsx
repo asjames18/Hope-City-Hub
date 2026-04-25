@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import { Suspense, lazy, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   MapPin,
@@ -9,23 +9,25 @@ import {
   Instagram,
   Facebook,
   Youtube,
+  Globe,
   CreditCard,
   ChevronRight,
   X,
   Info,
   Sparkles,
   MessageCircle,
-  Loader2,
-  Volume2,
-  StopCircle,
   Settings,
 } from 'lucide-react';
 import { getPageConfig, getPageConfigAsync, subscribePageConfig } from './lib/pageConfig';
-import { isSupabaseConfigured } from './lib/supabase';
-import { defaultConfig } from './lib/defaultConfig';
-import { generateText, isHuggingFaceConfigured } from './lib/huggingface';
 import { applySeo, removeStructuredData, setStructuredData } from './lib/seo';
 import { logClickEvent } from './lib/db';
+import AppErrorBoundary from './components/AppErrorBoundary.jsx';
+import PWAInstallPrompt from './components/PWAInstallPrompt.jsx';
+import { buildCalendarLink, buildMapsLink } from './lib/events';
+import { isAIEnabled } from './lib/ai';
+import { getExternalHref, getSiteIconUrl } from './lib/siteConfig';
+
+const HopeAIModal = lazy(() => import('./components/HopeAIModal.jsx'));
 
 // --- BRANDING CONFIGURATION ---
 const BRAND_COLORS = {
@@ -33,186 +35,6 @@ const BRAND_COLORS = {
   lime: '#A3D600',
   white: '#FFFFFF',
   gray: '#F9FAFB',
-};
-
-// --- AI ASSISTANT COMPONENT ---
-const HopeAIModal = ({ onClose }) => {
-  const [input, setInput] = useState('');
-  const [response, setResponse] = useState(null);
-  const [isLoading, setIsLoading] = useState(false);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const audioRef = useRef(null);
-
-  const generateEncouragement = async () => {
-    if (!input.trim()) return;
-    setIsLoading(true);
-    setResponse(null);
-    setIsPlaying(false);
-
-    try {
-      const instruction =
-        'You are a compassionate, encouraging pastoral assistant for Hope City Highlands church. ' +
-        'Provide: 1. A short, comforting prayer (3-4 sentences). 2. A relevant Bible verse (NIV or ESV). ' +
-        'Keep the tone hopeful, modern, and grace-filled. Do not be judgmental.';
-      const prompt = `${instruction}\n\nUser shares: ${input.trim()}\n\nYour response:`;
-
-      const result = await generateText(prompt, { maxNewTokens: 400 });
-
-      if (result.error) {
-        setResponse(`Sorry, ${result.error}`);
-      } else {
-        setResponse(result.text || "I'm having trouble connecting right now. Please try again.");
-      }
-    } catch (error) {
-      console.error(error);
-      setResponse('Sorry, something went wrong. Please check your connection.');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const generateSpeech = async () => {
-    if (!response || isPlaying) return;
-    setIsLoading(true);
-
-    try {
-      // TTS endpoint may vary; for demo we simulate playback
-      setIsPlaying(true);
-      setTimeout(() => setIsPlaying(false), 5000);
-    } catch (error) {
-      console.error(error);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/60 backdrop-blur-sm animate-in fade-in">
-      <div className="bg-white w-full max-w-lg h-[90vh] sm:h-auto sm:max-h-[85vh] sm:rounded-3xl rounded-t-3xl shadow-2xl overflow-hidden flex flex-col animate-in slide-in-from-bottom-5">
-        {/* Header */}
-        <div className="p-4 border-b border-gray-100 flex justify-between items-center bg-gray-50">
-          <div className="flex items-center gap-2">
-            <Sparkles className="w-5 h-5 text-lime-600 fill-lime-600" />
-            <h3 className="font-bold text-lg text-teal-900">Hope AI Assistant</h3>
-          </div>
-          <button
-            onClick={onClose}
-            className="p-2 hover:bg-gray-200 rounded-full transition-colors"
-          >
-            <X className="w-5 h-5 text-gray-500" />
-          </button>
-        </div>
-
-        {/* Content Area */}
-        <div className="flex-1 overflow-y-auto p-6">
-          {!response ? (
-            <div className="text-center space-y-6 py-8">
-              <div className="w-20 h-20 bg-lime-50 rounded-full flex items-center justify-center mx-auto">
-                <Heart className="w-10 h-10 text-lime-600" />
-              </div>
-              <div className="space-y-2">
-                <h4 className="text-xl font-bold text-teal-900">
-                  How can we pray for you?
-                </h4>
-                <p className="text-gray-500 text-sm max-w-xs mx-auto">
-                  Share what's on your heart, and our AI assistant will generate
-                  a prayer and scripture just for you.
-                </p>
-              </div>
-
-              <div className="grid grid-cols-2 gap-2 text-xs">
-                {[
-                  "I'm feeling anxious",
-                  'I need wisdom',
-                  'Pray for my family',
-                  "I'm thankful!",
-                ].map((tag) => (
-                  <button
-                    key={tag}
-                    onClick={() => setInput(tag)}
-                    className="p-2 rounded-lg bg-gray-50 hover:bg-lime-50 text-gray-600 hover:text-lime-700 transition-colors border border-gray-100"
-                  >
-                    {tag}
-                  </button>
-                ))}
-              </div>
-            </div>
-          ) : (
-            <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2">
-              <div className="bg-lime-50 p-6 rounded-2xl border border-lime-100">
-                <h5 className="text-xs font-bold text-lime-700 uppercase tracking-wider mb-3 flex items-center gap-2">
-                  <Sparkles className="w-3 h-3" /> Personalized Prayer
-                </h5>
-                <p className="text-teal-900 leading-relaxed font-medium whitespace-pre-wrap">
-                  {response}
-                </p>
-              </div>
-
-              <div className="flex gap-3">
-                <button
-                  onClick={generateSpeech}
-                  disabled={isPlaying || isLoading}
-                  className="flex-1 py-3 px-4 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-all bg-teal-900 text-white hover:bg-teal-800 disabled:opacity-50"
-                >
-                  {isLoading ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                  ) : isPlaying ? (
-                    <StopCircle className="w-4 h-4" />
-                  ) : (
-                    <Volume2 className="w-4 h-4" />
-                  )}
-                  {isPlaying ? 'Playing...' : 'Listen to Prayer'}
-                </button>
-                <button
-                  onClick={() => {
-                    setResponse(null);
-                    setInput('');
-                  }}
-                  className="px-4 py-3 rounded-xl font-bold text-sm bg-gray-100 text-gray-600 hover:bg-gray-200"
-                >
-                  New Prayer
-                </button>
-              </div>
-              <p className="text-[10px] text-gray-400 text-center">
-                This content is AI-generated. Always seek counsel
-                from our pastoral team for serious matters.
-              </p>
-            </div>
-          )}
-        </div>
-
-        {/* Input Area */}
-        {!response && (
-          <div className="p-4 bg-white border-t border-gray-100">
-            <div className="relative">
-              <textarea
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                placeholder="Type here (e.g., 'I'm stressed about work...')"
-                className="w-full pl-4 pr-12 py-3 bg-gray-50 rounded-xl border-none focus:ring-2 focus:ring-lime-500 text-gray-700 resize-none h-14"
-              />
-              <button
-                onClick={generateEncouragement}
-                disabled={!input.trim() || isLoading || !isHuggingFaceConfigured()}
-                className="absolute right-2 top-2 p-2 bg-teal-900 text-white rounded-lg hover:bg-teal-800 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-              >
-                {isLoading ? (
-                  <Loader2 className="w-5 h-5 animate-spin" />
-                ) : (
-                  <ChevronRight className="w-5 h-5" />
-                )}
-              </button>
-            </div>
-            {!isHuggingFaceConfigured() && (
-              <p className="text-xs text-amber-600 mt-2">
-                Configure Supabase and deploy the hf-generate function to enable AI prayers.
-              </p>
-            )}
-          </div>
-        )}
-      </div>
-    </div>
-  );
 };
 
 // --- COMPONENTS ---
@@ -224,8 +46,8 @@ const AnnouncementBanner = ({ announcement, onAnnouncementClick }) => {
     if (announcement?.active) setIsVisible(true);
   }, [announcement?.active]);
   if (!announcement?.active || !isVisible) return null;
-  const link = typeof announcement?.link === 'string' ? announcement.link.trim() : '';
-  const hasLink = link && link !== '#';
+  const link = getExternalHref(announcement?.link);
+  const hasLink = Boolean(link);
   return (
     <div
       className="relative px-4 py-3 pr-10 text-sm font-bold text-center text-white shadow-md animate-in slide-in-from-top"
@@ -252,6 +74,7 @@ const AnnouncementBanner = ({ announcement, onAnnouncementClick }) => {
       </div>
       <button
         onClick={() => setIsVisible(false)}
+        aria-label="Dismiss announcement"
         className="absolute right-2 top-1/2 -translate-y-1/2 p-1 hover:bg-black/10 rounded-full transition-colors"
       >
         <X className="w-4 h-4" />
@@ -268,6 +91,9 @@ const ActionLink = ({
   subtitle,
   variant = 'teal',
 }) => {
+  const externalHref = getExternalHref(href);
+  const isDisabled = !externalHref;
+
   const getStyles = () => {
     switch (variant) {
       case 'teal':
@@ -299,16 +125,18 @@ const ActionLink = ({
     }
   };
 
-  const Component = href ? 'a' : 'button';
-  const props = href
-    ? { href, target: '_blank', rel: 'noopener noreferrer', onClick }
-    : { onClick };
+  const Component = externalHref ? 'a' : 'button';
+  const props = externalHref
+    ? { href: externalHref, target: '_blank', rel: 'noopener noreferrer', onClick }
+    : { type: 'button', disabled: true };
 
   return (
     <Component
       {...props}
       style={getStyles()}
-      className="flex items-center w-full p-4 mb-3 rounded-xl border-2 shadow-sm transition-all transform hover:scale-[1.01] active:scale-[0.98]"
+      className={`flex items-center w-full p-4 mb-3 rounded-xl border-2 shadow-sm transition-all transform ${
+        isDisabled ? 'cursor-not-allowed opacity-60' : 'hover:scale-[1.01] active:scale-[0.98]'
+      }`}
     >
       <div
         className={`p-2 rounded-full mr-4 ${variant === 'white' ? 'bg-gray-50' : 'bg-white/20'}`}
@@ -344,6 +172,7 @@ const ActionLink = ({
 
 const EventRow = ({ event }) => {
   const calendarLink = buildCalendarLink(event);
+  const mapsLink = buildMapsLink(event.location);
 
   return (
     <div
@@ -384,6 +213,17 @@ const EventRow = ({ event }) => {
           <div className="text-xs text-gray-500 font-medium flex items-center mt-1">
             <Clock className="w-3 h-3 mr-1" /> {event.time}
           </div>
+          {mapsLink && (
+            <a
+              href={mapsLink}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-1 flex items-start gap-1 text-xs font-medium text-gray-500 hover:text-teal-900"
+            >
+              <MapPin className="mt-0.5 h-3 w-3 flex-none" />
+              <span>{event.location}</span>
+            </a>
+          )}
         </div>
       </div>
 
@@ -414,122 +254,32 @@ const EventRow = ({ event }) => {
   );
 };
 
-const MONTH_INDEX = {
-  jan: 0,
-  feb: 1,
-  mar: 2,
-  apr: 3,
-  may: 4,
-  jun: 5,
-  jul: 6,
-  aug: 7,
-  sep: 8,
-  oct: 9,
-  nov: 10,
-  dec: 11,
-};
-
-function parseEventStart(dateLabel, timeLabel) {
-  const dateMatch = String(dateLabel || '').trim().match(/^([A-Za-z]+)\s+(\d{1,2})$/);
-  if (!dateMatch) return null;
-
-  const month = MONTH_INDEX[dateMatch[1].slice(0, 3).toLowerCase()];
-  if (month == null) return null;
-
-  const day = Number(dateMatch[2]);
-  const timeText = String(timeLabel || '').trim();
-  const timeMatch = timeText.match(/^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)$/i);
-  const hasTime = !!timeMatch;
-
-  let hour = 12;
-  let minute = 0;
-  if (timeMatch) {
-    const hour12 = Number(timeMatch[1]);
-    minute = Number(timeMatch[2] || 0);
-    const meridiem = timeMatch[3].toUpperCase();
-    if (hour12 < 1 || hour12 > 12 || minute < 0 || minute > 59) return null;
-    hour = hour12 % 12;
-    if (meridiem === 'PM') hour += 12;
-  }
-
-  const now = new Date();
-  let year = now.getFullYear();
-  let start = new Date(year, month, day, hour, minute, 0, 0);
-  if (start.getTime() < now.getTime() - 24 * 60 * 60 * 1000) {
-    year += 1;
-    start = new Date(year, month, day, hour, minute, 0, 0);
-  }
-  return { start, hasTime };
-}
-
-function formatIcsUtc(date) {
-  return date.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
-}
-
-function buildCalendarLink(event) {
-  const parsed = parseEventStart(event?.date, event?.time);
-  if (!parsed) return null;
-  const { start, hasTime } = parsed;
-  const end = new Date(start.getTime() + (hasTime ? 90 : 24 * 60) * 60 * 1000);
-  const title = String(event?.title || 'Hope City Event');
-  const description = [
-    'Hope City Highlands event',
-    event?.signupUrl ? `Sign up: ${event.signupUrl}` : null,
-  ].filter(Boolean).join('\\n');
-
-  const dateOnly = start.toISOString().slice(0, 10).replace(/-/g, '');
-  const nextDateOnly = end.toISOString().slice(0, 10).replace(/-/g, '');
-
-  const ics = [
-    'BEGIN:VCALENDAR',
-    'VERSION:2.0',
-    'PRODID:-//Hope City Highlands//Event Calendar//EN',
-    'BEGIN:VEVENT',
-    `UID:${Date.now()}-${Math.random().toString(36).slice(2)}@hopecityhighlands.com`,
-    `DTSTAMP:${formatIcsUtc(new Date())}`,
-    hasTime ? `DTSTART:${formatIcsUtc(start)}` : `DTSTART;VALUE=DATE:${dateOnly}`,
-    hasTime ? `DTEND:${formatIcsUtc(end)}` : `DTEND;VALUE=DATE:${nextDateOnly}`,
-    `SUMMARY:${title.replace(/\n/g, ' ')}`,
-    `LOCATION:1700 Simpson Ave, Sebring, FL 33870`,
-    `DESCRIPTION:${description.replace(/\n/g, '\\n')}`,
-    'END:VEVENT',
-    'END:VCALENDAR',
-  ].join('\r\n');
-
-  return {
-    href: `data:text/calendar;charset=utf-8,${encodeURIComponent(ics)}`,
-    filename: `${title.toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'hope-city-event'}.ics`,
-  };
-}
-
 export default function App() {
   const [showAI, setShowAI] = useState(false);
-  const aiEnabled = import.meta.env.DEV;
+  const aiEnabled = isAIEnabled();
   const [showAllEvents, setShowAllEvents] = useState(false);
-  const [configReady, setConfigReady] = useState(false);
-  // When Supabase is configured, start with default so we don't show stale localStorage; DB load will replace it
-  const [config, setConfig] = useState(() =>
-    isSupabaseConfigured() ? JSON.parse(JSON.stringify(defaultConfig)) : getPageConfig()
-  );
+  const [config, setConfig] = useState(() => getPageConfig());
   useEffect(() => {
-    setConfigReady(false);
     getPageConfigAsync()
-      .then((c) => c != null && setConfig(c))
-      .finally(() => setConfigReady(true));
+      .then((c) => c != null && setConfig(c));
     return subscribePageConfig((c) => c != null && setConfig(c));
   }, []);
 
   useEffect(() => {
+    const currentSiteIconUrl = getSiteIconUrl(config);
     applySeo({
       title: 'Hope City Highlands | Sebring, FL',
       description:
         'Hope City Highlands in Sebring, Florida. Join us to belong, believe, and become with worship, prayer, and community.',
       canonicalPath: '/',
+      ogImagePath: currentSiteIconUrl,
+      iconPath: currentSiteIconUrl,
       noindex: false,
     });
 
     const socialLinks = [config?.socials?.facebook, config?.socials?.instagram, config?.socials?.youtube]
-      .filter((url) => typeof url === 'string' && url.trim() && url !== '#');
+      .map((url) => getExternalHref(url))
+      .filter(Boolean);
     const siteUrl = typeof window !== 'undefined' ? window.location.origin : 'https://hopecityhighlands.com';
 
     setStructuredData('hope-city-org', {
@@ -559,17 +309,29 @@ export default function App() {
     });
 
     return () => removeStructuredData('hope-city-org');
-  }, [config?.socials?.facebook, config?.socials?.instagram, config?.socials?.youtube]);
+  }, [config]);
 
   const links = config?.links ?? {};
   const socials = config?.socials ?? {};
-  const events = configReady ? (config?.events ?? []) : [];
+  const events = config?.events ?? [];
+  const siteIconUrl = getSiteIconUrl(config);
   const visibleEvents = showAllEvents ? events : events.slice(0, 5);
+  const actionLinks = {
+    connectCard: getExternalHref(links.connectCard),
+    giving: getExternalHref(links.giving),
+    prayerRequest: getExternalHref(links.prayerRequest),
+    directions: getExternalHref(links.directions),
+  };
+  const socialItems = [
+    { key: 'website', label: 'Website', href: getExternalHref(socials.website), icon: Globe },
+    { key: 'instagram', label: 'Instagram', href: getExternalHref(socials.instagram), icon: Instagram },
+    { key: 'facebook', label: 'Facebook', href: getExternalHref(socials.facebook), icon: Facebook },
+    { key: 'youtube', label: 'YouTube', href: getExternalHref(socials.youtube), icon: Youtube },
+  ].filter((item) => item.href);
 
   useEffect(() => {
-    if (!configReady) return;
     if (events.length <= 5) setShowAllEvents(false);
-  }, [configReady, events.length]);
+  }, [events.length]);
 
   const trackClick = (action, targetUrl, source = 'home', tag = '') => {
     void logClickEvent({
@@ -584,28 +346,24 @@ export default function App() {
 
   return (
     <div
-      className="min-h-screen font-sans selection:bg-lime-100 pb-20"
+      className="min-h-screen font-sans selection:bg-lime-100 pb-[calc(5rem+env(safe-area-inset-bottom))]"
       style={{ backgroundColor: BRAND_COLORS.gray }}
     >
-      {configReady && config?.announcement?.active && (
+      {config?.announcement?.active && (
         <AnnouncementBanner
           announcement={config?.announcement}
           onAnnouncementClick={(url) => trackClick('announcement', url)}
         />
       )}
 
-      <main className="max-w-md mx-auto px-4 py-8">
+      <main className="max-w-md mx-auto px-4 py-6 sm:py-8">
         {/* Header */}
         <div className="text-center mb-8">
-          <div
-            className="inline-flex items-center justify-center w-12 h-12 rounded-xl shadow-xl mb-4"
-            style={{
-              backgroundColor: BRAND_COLORS.teal,
-              shadowColor: 'rgba(0, 78, 89, 0.2)',
-            }}
-          >
-            <span className="text-white font-bold text-2xl">H</span>
-          </div>
+          <img
+            src={siteIconUrl}
+            alt="Hope City Highlands icon"
+            className="mx-auto mb-4 h-12 w-12 rounded-xl shadow-xl"
+          />
           <h1
             className="text-2xl font-extrabold tracking-tight"
             style={{ color: BRAND_COLORS.teal }}
@@ -623,24 +381,24 @@ export default function App() {
         {/* Primary Actions */}
         <div className="mb-10">
           <ActionLink
-            href={links.connectCard}
-            onClick={() => trackClick('connect', links.connectCard)}
+            href={actionLinks.connectCard}
+            onClick={actionLinks.connectCard ? () => trackClick('connect', actionLinks.connectCard) : undefined}
             icon={Users}
             title="I'm New / Connect"
             subtitle="Digital connection card"
             variant="teal"
           />
           <ActionLink
-            href={links.giving}
-            onClick={() => trackClick('give', links.giving)}
+            href={actionLinks.giving}
+            onClick={actionLinks.giving ? () => trackClick('give', actionLinks.giving) : undefined}
             icon={CreditCard}
             title="Give Online"
             subtitle="Secure via Tithe.ly"
             variant="lime"
           />
           <ActionLink
-            href={links.prayerRequest}
-            onClick={() => trackClick('prayer', links.prayerRequest)}
+            href={actionLinks.prayerRequest}
+            onClick={actionLinks.prayerRequest ? () => trackClick('prayer', actionLinks.prayerRequest) : undefined}
             icon={Heart}
             title="Prayer Request"
             variant="white"
@@ -671,37 +429,43 @@ export default function App() {
           )}
         </div>
 
+        <div className="mb-8">
+          <PWAInstallPrompt />
+        </div>
+
         {/* Footer */}
         <div className="text-center border-t border-gray-200 pt-8">
-          <div className="flex justify-center gap-8 mb-6">
+          {socialItems.length > 0 && (
+            <div className="mb-6 flex justify-center gap-8">
+              {socialItems.map(({ key, label, href, icon: Icon }) => (
+                <a
+                  key={key}
+                  href={href}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-label={`Visit Hope City Highlands on ${label}`}
+                  className="text-gray-400 transition-colors hover:opacity-80"
+                >
+                  <Icon className="w-6 h-6" />
+                </a>
+              ))}
+            </div>
+          )}
+          {actionLinks.directions ? (
             <a
-              href={socials.instagram}
-              className="text-gray-400 hover:opacity-80 transition-colors"
+              href={actionLinks.directions}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={() => trackClick('directions', actionLinks.directions)}
+              className="flex items-center justify-center gap-1 text-xs font-bold text-gray-400 hover:opacity-80"
             >
-              <Instagram className="w-6 h-6" />
+              <MapPin className="w-3 h-3" /> 1700 Simpson Ave, Sebring, FL
             </a>
-            <a
-              href={socials.facebook}
-              className="text-gray-400 hover:opacity-80 transition-colors"
-            >
-              <Facebook className="w-6 h-6" />
-            </a>
-            <a
-              href={socials.youtube}
-              className="text-gray-400 hover:opacity-80 transition-colors"
-            >
-              <Youtube className="w-6 h-6" />
-            </a>
-          </div>
-          <a
-            href={links.directions}
-            target="_blank"
-            rel="noopener noreferrer"
-            onClick={() => trackClick('directions', links.directions)}
-            className="flex items-center justify-center gap-1 text-xs font-bold text-gray-400 hover:opacity-80"
-          >
-            <MapPin className="w-3 h-3" /> 1700 Simpson Ave, Sebring, FL
-          </a>
+          ) : (
+            <p className="flex items-center justify-center gap-1 text-xs font-bold text-gray-400">
+              <MapPin className="w-3 h-3" /> 1700 Simpson Ave, Sebring, FL
+            </p>
+          )}
           <Link
             to="/admin"
             className="mt-4 inline-flex items-center gap-1 text-xs font-medium text-gray-400 hover:text-teal-900 transition-colors"
@@ -723,6 +487,7 @@ export default function App() {
                 '0 10px 25px -5px rgba(0, 78, 89, 0.4), 0 8px 10px -6px rgba(0, 78, 89, 0.1)',
             }}
             aria-label="Open Hope AI Assistant"
+            aria-haspopup="dialog"
           >
             <MessageCircle className="w-8 h-8 text-white fill-white/10" />
             <div className="absolute top-3 right-3">
@@ -733,7 +498,21 @@ export default function App() {
             </div>
           </button>
 
-          {showAI && <HopeAIModal onClose={() => setShowAI(false)} />}
+          {showAI && (
+            <AppErrorBoundary title="Assistant failed to load" resetKeys={[showAI]}>
+              <Suspense
+                fallback={(
+                  <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+                    <div className="rounded-2xl bg-white px-5 py-4 text-sm font-medium text-teal-900 shadow-xl">
+                      Loading assistant...
+                    </div>
+                  </div>
+                )}
+              >
+                <HopeAIModal onClose={() => setShowAI(false)} />
+              </Suspense>
+            </AppErrorBoundary>
+          )}
         </>
       )}
     </div>

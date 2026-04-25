@@ -1,13 +1,16 @@
 import { supabase, isSupabaseConfigured } from './supabase';
 import { defaultConfig } from './defaultConfig';
+import { getPageConfigCacheKey, normalizePageConfig } from './siteConfig';
 
 const CONFIG_ID = 1;
 const CLICK_ACTIONS = ['connect', 'give', 'prayer', 'directions', 'announcement'];
 const ADMIN_AUTHZ_ERROR =
   'You are signed in, but not authorized for admin access. Contact your system administrator.';
+let supportsPublicPageConfigRpc = true;
+let supportsPublicPageConfigMetaRpc = true;
 
 function normalizeConfigPayload(row, eventRows) {
-  return {
+  return normalizePageConfig({
     announcement: row?.announcement ?? defaultConfig.announcement,
     links: row?.links ?? defaultConfig.links,
     socials: row?.socials ?? defaultConfig.socials,
@@ -16,9 +19,109 @@ function normalizeConfigPayload(row, eventRows) {
       title: e.title ?? '',
       date: e.date ?? '',
       time: e.time ?? '',
+      location: e.location ?? '',
       signupUrl: e.signup_url ?? '',
     })),
+  });
+}
+
+function isMissingRpc(error, functionName) {
+  const message = String(error?.message || '');
+  const details = String(error?.details || '');
+  return error?.code === 'PGRST202'
+    || message.includes(functionName)
+    || details.includes(functionName);
+}
+
+async function fetchPageConfigFromTables() {
+  const [configRes, eventsRes] = await Promise.all([
+    supabase.from('site_config').select('announcement, links, socials').eq('id', CONFIG_ID).single(),
+    supabase.from('events').select('id, title, date, time, location, signup_url, order_index').order('order_index', { ascending: true }),
+  ]);
+
+  if (configRes.error || eventsRes.error) {
+    console.warn('Supabase fetch error:', configRes.error || eventsRes.error);
+    return null;
+  }
+
+  const config = normalizeConfigPayload(configRes.data, eventsRes.data);
+  return {
+    config,
+    meta: {
+      cacheKey: getPageConfigCacheKey(config),
+      generatedAt: new Date().toISOString(),
+    },
   };
+}
+
+async function fetchPageConfigMetaFromRpc() {
+  if (!supportsPublicPageConfigMetaRpc) return null;
+
+  const { data, error } = await supabase.rpc('get_public_page_config_meta');
+  if (error) {
+    if (isMissingRpc(error, 'get_public_page_config_meta')) {
+      supportsPublicPageConfigMetaRpc = false;
+    } else {
+      console.warn('get_public_page_config_meta error:', error);
+    }
+    return null;
+  }
+
+  return {
+    cacheKey: data?.cache_key || null,
+    generatedAt: data?.generated_at || null,
+  };
+}
+
+export async function fetchPageConfigResult() {
+  if (!isSupabaseConfigured()) return null;
+  if (!supportsPublicPageConfigRpc) {
+    return await fetchPageConfigFromTables();
+  }
+
+  try {
+    const { data, error } = await supabase.rpc('get_public_page_config');
+    if (error) {
+      if (isMissingRpc(error, 'get_public_page_config')) {
+        supportsPublicPageConfigRpc = false;
+      } else {
+        console.warn('get_public_page_config error:', error);
+      }
+      return await fetchPageConfigFromTables();
+    }
+
+    const config = normalizeConfigPayload(data?.site_config, data?.events);
+    return {
+      config,
+      meta: {
+        cacheKey: data?.meta?.cache_key || getPageConfigCacheKey(config),
+        generatedAt: data?.meta?.generated_at || null,
+      },
+    };
+  } catch (err) {
+    console.warn('fetchPageConfig error:', err);
+    try {
+      return await fetchPageConfigFromTables();
+    } catch (fallbackErr) {
+      console.warn('fetchPageConfig fallback error:', fallbackErr);
+      return null;
+    }
+  }
+}
+
+export async function fetchPageConfigMeta() {
+  if (!isSupabaseConfigured()) return null;
+
+  try {
+    const meta = await fetchPageConfigMetaFromRpc();
+    if (meta) return meta;
+
+    const result = await fetchPageConfigFromTables();
+    return result?.meta || null;
+  } catch (err) {
+    console.warn('fetchPageConfigMeta error:', err);
+    return null;
+  }
 }
 
 /**
@@ -26,24 +129,8 @@ function normalizeConfigPayload(row, eventRows) {
  * If Supabase is not configured or request fails, returns null (caller should use localStorage/defaults).
  */
 export async function fetchPageConfig() {
-  if (!isSupabaseConfigured()) return null;
-
-  try {
-    const [configRes, eventsRes] = await Promise.all([
-      supabase.from('site_config').select('announcement, links, socials').eq('id', CONFIG_ID).single(),
-      supabase.from('events').select('id, title, date, time, signup_url, order_index').order('order_index', { ascending: true }),
-    ]);
-
-    if (configRes.error || eventsRes.error) {
-      console.warn('Supabase fetch error:', configRes.error || eventsRes.error);
-      return null;
-    }
-
-    return normalizeConfigPayload(configRes.data, eventsRes.data);
-  } catch (err) {
-    console.warn('fetchPageConfig error:', err);
-    return null;
-  }
+  const result = await fetchPageConfigResult();
+  return result?.config || null;
 }
 
 /**
@@ -62,6 +149,7 @@ export async function savePageConfigToDb(config) {
         title: String(event?.title || ''),
         date: String(event?.date || ''),
         time: String(event?.time || ''),
+        location: String(event?.location || ''),
         signup_url: String(event?.signupUrl || event?.signup_url || ''),
         order_index: index,
       }))
@@ -191,6 +279,53 @@ export async function fetchRecentClickEvents({ limit = 50, from, to } = {}) {
     }));
   } catch (err) {
     console.warn('fetchRecentClickEvents exception:', err);
+    return [];
+  }
+}
+
+export async function fetchRecentAIChats({ limit = 30, from, to } = {}) {
+  if (!isSupabaseConfigured()) return [];
+
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return [];
+
+  try {
+    let query = supabase
+      .from('ai_chat_logs')
+      .select('prompt, response, error, provider, model, origin, path, success, metadata, created_at');
+
+    if (from) query = query.gte('created_at', from);
+    if (to) query = query.lte('created_at', to);
+    query = query.order('created_at', { ascending: false });
+    if (limit > 0) query = query.limit(limit);
+
+    const { data, error } = await query;
+    if (error) {
+      if (/not authorized/i.test(error.message || '')) {
+        throw new Error(ADMIN_AUTHZ_ERROR);
+      }
+      console.warn('fetchRecentAIChats error:', error);
+      return [];
+    }
+
+    return (data || []).map((row) => ({
+      prompt: row.prompt ?? '',
+      response: row.response ?? '',
+      error: row.error ?? '',
+      provider: row.provider ?? '',
+      model: row.model ?? '',
+      intent: row.metadata?.intent ?? '',
+      origin: row.origin ?? '',
+      path: row.path ?? '',
+      success: Boolean(row.success),
+      metadata: row.metadata ?? {},
+      createdAt: row.created_at ?? '',
+    }));
+  } catch (err) {
+    if (err?.message === ADMIN_AUTHZ_ERROR) {
+      throw err;
+    }
+    console.warn('fetchRecentAIChats exception:', err);
     return [];
   }
 }

@@ -1,0 +1,4 @@
+# Browser calls to hf-generate use POST + apikey/Authorization, which triggers a CORS preflight.
+# Preflight OPTIONS requests do not include a JWT, so the gateway would reject them with verify_jwt enabled.
+[functions.hf-generate]
+verify_jwt = false
