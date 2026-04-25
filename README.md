@@ -62,7 +62,7 @@ To store config and events in a **Supabase** (Postgres) database:
    VITE_SUPABASE_ANON_KEY=your_anon_key
    ```
    (Find URL and anon key under **Settings → API**.)
-10. Restart the dev server. Optionally deploy the **invite-admin** Edge Function so existing admins can invite others: install [Supabase CLI](https://supabase.com/docs/guides/cli), run `supabase link` and `supabase functions deploy invite-admin`. Then use **Add admin** in `/admin` to send invite emails.
+10. Restart the dev server. Optionally deploy the **invite-admin** Edge Function so existing admins can invite others: install [Supabase CLI](https://supabase.com/docs/guides/cli), run `supabase link` and `supabase functions deploy invite-admin --no-verify-jwt`. Then use **Add admin** in `/admin` to send invite emails.
 11. Run `supabase/migrations/006_admin_audit_log.sql` to add admin audit logging.
 12. Run `supabase/migrations/007_keepalive_ping.sql` if you want a lightweight keepalive RPC.
 13. Run `supabase/migrations/008_keepalive_cron.sql` if you want the initial Supabase Cron wiring.
@@ -77,9 +77,9 @@ To store config and events in a **Supabase** (Postgres) database:
    ```bash
    supabase secrets set ALLOWED_ORIGINS=https://hopecityhighlands.com,https://www.hopecityhighlands.com,https://hope-city-hub.vercel.app
    ```
-22. Redeploy edge functions after changing secrets or function code. For **Hope AI**, turn off Supabase gateway JWT checks on `hf-generate` so the browser’s OPTIONS preflight succeeds (see `supabase/config.toml`, or use the flag below):
+22. Redeploy edge functions after changing secrets or function code. Turn off Supabase gateway JWT checks for browser-called functions so CORS preflights and ES256 session tokens reach the function code (see `supabase/config.toml`, or use the flags below):
    ```bash
-   supabase functions deploy invite-admin
+   supabase functions deploy invite-admin --no-verify-jwt
    supabase functions deploy hf-generate --no-verify-jwt
    ```
 

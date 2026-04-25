@@ -2,3 +2,8 @@
 # Preflight OPTIONS requests do not include a JWT, so the gateway would reject them with verify_jwt enabled.
 [functions.hf-generate]
 verify_jwt = false
+
+# invite-admin verifies the caller inside the function with supabase.auth.getUser().
+# Disable gateway JWT verification so ES256 access tokens and CORS preflights reach the function.
+[functions.invite-admin]
+verify_jwt = false
