@@ -23,7 +23,7 @@ import { applySeo, removeStructuredData, setStructuredData } from './lib/seo';
 import { logClickEvent } from './lib/db';
 import AppErrorBoundary from './components/AppErrorBoundary.jsx';
 import PWAInstallPrompt from './components/PWAInstallPrompt.jsx';
-import { buildCalendarLink, buildMapsLink } from './lib/events';
+import { buildCalendarLink, buildMapsLink, getEventLocationAddress, getEventLocationName } from './lib/events';
 import { isAIEnabled } from './lib/ai';
 import { getExternalHref, getSiteIconUrl } from './lib/siteConfig';
 
@@ -172,7 +172,10 @@ const ActionLink = ({
 
 const EventRow = ({ event }) => {
   const calendarLink = buildCalendarLink(event);
-  const mapsLink = buildMapsLink(event.location);
+  const locationName = getEventLocationName(event);
+  const locationAddress = getEventLocationAddress(event);
+  const locationNameMapsLink = buildMapsLink([locationName, locationAddress].filter(Boolean).join(' '));
+  const locationAddressMapsLink = buildMapsLink(locationAddress);
 
   return (
     <div
@@ -213,16 +216,32 @@ const EventRow = ({ event }) => {
           <div className="text-xs text-gray-500 font-medium flex items-center mt-1">
             <Clock className="w-3 h-3 mr-1" /> {event.time}
           </div>
-          {mapsLink && (
-            <a
-              href={mapsLink}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="mt-1 flex items-start gap-1 text-xs font-medium text-gray-500 hover:text-teal-900"
-            >
-              <MapPin className="mt-0.5 h-3 w-3 flex-none" />
-              <span>{event.location}</span>
-            </a>
+          {(locationNameMapsLink || locationAddressMapsLink) && (
+            <div className="mt-1 space-y-0.5 text-xs font-medium text-gray-500">
+              {locationName && locationNameMapsLink && (
+                <a
+                  href={locationNameMapsLink}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-start gap-1 hover:text-teal-900"
+                >
+                  <MapPin className="mt-0.5 h-3 w-3 flex-none" />
+                  <span>{locationName}</span>
+                </a>
+              )}
+              {locationAddress && locationAddressMapsLink && (
+                <a
+                  href={locationAddressMapsLink}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-start gap-1 hover:text-teal-900"
+                >
+                  {!locationName && <MapPin className="mt-0.5 h-3 w-3 flex-none" />}
+                  {locationName && <span className="w-3 flex-none" aria-hidden="true" />}
+                  <span>{locationAddress}</span>
+                </a>
+              )}
+            </div>
           )}
         </div>
       </div>

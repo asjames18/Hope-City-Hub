@@ -21,12 +21,18 @@ export function mergePageConfig(target, source) {
 }
 
 function normalizeEvent(event) {
+  const locationName = String(event?.locationName || event?.location_name || '');
+  const locationAddress = String(event?.locationAddress || event?.location_address || event?.location || '');
+  const location = String(event?.location || [locationName, locationAddress].filter(Boolean).join(', '));
+
   return {
     id: event?.id ?? null,
     title: String(event?.title || ''),
     date: String(event?.date || ''),
     time: String(event?.time || ''),
-    location: String(event?.location || ''),
+    location,
+    locationName,
+    locationAddress,
     signupUrl: String(event?.signupUrl || event?.signup_url || ''),
   };
 }

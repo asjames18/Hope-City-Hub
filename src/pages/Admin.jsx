@@ -363,7 +363,7 @@ export default function Admin() {
   const addEvent = () => {
     setConfig((prev) => ({
       ...prev,
-      events: [...(prev.events || []), { id: `temp-${Date.now()}`, title: '', date: '', time: '', location: '', signupUrl: '' }],
+      events: [...(prev.events || []), { id: `temp-${Date.now()}`, title: '', date: '', time: '', location: '', locationName: '', locationAddress: '', signupUrl: '' }],
     }));
   };
 
@@ -947,13 +947,22 @@ export default function Admin() {
                         {timeError && <p className="mt-1 text-xs text-red-600">{timeError}</p>}
                       </div>
                     </div>
-                    <input
-                      type="text"
-                      placeholder="Location / address (opens GPS when clicked)"
-                      value={event.location ?? ''}
-                      onChange={(e) => updateEvent(index, 'location', e.target.value)}
-                      className="w-full px-3 py-2 rounded-lg border border-gray-200 text-sm focus:ring-2 focus:ring-teal-500"
-                    />
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                      <input
+                        type="text"
+                        placeholder="Location name (opens GPS when clicked)"
+                        value={event.locationName ?? ''}
+                        onChange={(e) => updateEvent(index, 'locationName', e.target.value)}
+                        className="w-full px-3 py-2 rounded-lg border border-gray-200 text-sm focus:ring-2 focus:ring-teal-500"
+                      />
+                      <input
+                        type="text"
+                        placeholder="Location address (opens GPS when clicked)"
+                        value={event.locationAddress ?? event.location ?? ''}
+                        onChange={(e) => updateEvent(index, 'locationAddress', e.target.value)}
+                        className="w-full px-3 py-2 rounded-lg border border-gray-200 text-sm focus:ring-2 focus:ring-teal-500"
+                      />
+                    </div>
                     <input
                       type="url"
                       placeholder="Sign-up URL (optional)"

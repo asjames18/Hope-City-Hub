@@ -1,7 +1,14 @@
--- Store per-event locations so public event cards can open maps/GPS and calendar files include the venue.
+-- Store optional per-event location names and addresses so public event cards can open maps/GPS.
 
 alter table public.events
-  add column if not exists location text default '';
+  add column if not exists location text default '',
+  add column if not exists location_name text default '',
+  add column if not exists location_address text default '';
+
+update public.events
+set location_address = location
+where nullif(trim(coalesce(location_address, '')), '') is null
+  and nullif(trim(coalesce(location, '')), '') is not null;
 
 create or replace function public.get_public_page_config_meta()
 returns jsonb
@@ -34,6 +41,8 @@ as $$
             'date', e.date,
             'time', e.time,
             'location', e.location,
+            'location_name', e.location_name,
+            'location_address', e.location_address,
             'signup_url', e.signup_url,
             'order_index', e.order_index,
             'created_at', e.created_at
@@ -82,6 +91,8 @@ as $$
             'date', e.date,
             'time', e.time,
             'location', e.location,
+            'location_name', e.location_name,
+            'location_address', e.location_address,
             'signup_url', e.signup_url,
             'order_index', e.order_index
           )
@@ -142,13 +153,15 @@ begin
       and (event_item->>'id') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' then
       event_id := (event_item->>'id')::uuid;
 
-      insert into public.events (id, title, date, time, location, signup_url, order_index)
+      insert into public.events (id, title, date, time, location, location_name, location_address, signup_url, order_index)
       values (
         event_id,
         coalesce(event_item->>'title', ''),
         coalesce(event_item->>'date', ''),
         coalesce(event_item->>'time', ''),
         coalesce(event_item->>'location', ''),
+        coalesce(event_item->>'location_name', ''),
+        coalesce(event_item->>'location_address', ''),
         coalesce(event_item->>'signup_url', ''),
         coalesce((event_item->>'order_index')::int, 0)
       )
@@ -158,15 +171,19 @@ begin
         date = excluded.date,
         time = excluded.time,
         location = excluded.location,
+        location_name = excluded.location_name,
+        location_address = excluded.location_address,
         signup_url = excluded.signup_url,
         order_index = excluded.order_index;
     else
-      insert into public.events (title, date, time, location, signup_url, order_index)
+      insert into public.events (title, date, time, location, location_name, location_address, signup_url, order_index)
       values (
         coalesce(event_item->>'title', ''),
         coalesce(event_item->>'date', ''),
         coalesce(event_item->>'time', ''),
         coalesce(event_item->>'location', ''),
+        coalesce(event_item->>'location_name', ''),
+        coalesce(event_item->>'location_address', ''),
         coalesce(event_item->>'signup_url', ''),
         coalesce((event_item->>'order_index')::int, 0)
       )
@@ -199,6 +216,8 @@ begin
         'date', e.date,
         'time', e.time,
         'location', e.location,
+        'location_name', e.location_name,
+        'location_address', e.location_address,
         'signup_url', e.signup_url,
         'order_index', e.order_index
       )

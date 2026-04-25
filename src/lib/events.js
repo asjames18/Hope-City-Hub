@@ -69,6 +69,20 @@ export function buildMapsLink(location) {
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(text)}`;
 }
 
+export function getEventLocationName(event) {
+  return String(event?.locationName || event?.location_name || '').trim();
+}
+
+export function getEventLocationAddress(event) {
+  return String(event?.locationAddress || event?.location_address || event?.location || '').trim();
+}
+
+export function formatEventLocation(event) {
+  const name = getEventLocationName(event);
+  const address = getEventLocationAddress(event);
+  return [name, address].filter(Boolean).join(', ');
+}
+
 export function buildCalendarLink(event) {
   const parsed = parseEventDateTime(event?.date, event?.time);
   if (!parsed) return null;
@@ -76,7 +90,7 @@ export function buildCalendarLink(event) {
   const { start, hasTime } = parsed;
   const end = new Date(start.getTime() + (hasTime ? 90 : 24 * 60) * 60 * 1000);
   const title = String(event?.title || 'Hope City Event');
-  const location = String(event?.location || '').trim();
+  const location = formatEventLocation(event);
   const description = [
     'Hope City Highlands event',
     location ? `Location: ${location}` : null,

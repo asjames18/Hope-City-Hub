@@ -56,7 +56,18 @@ type SiteConfigData = {
   announcement?: { active?: boolean; text?: string; link?: string };
   links?: Record<string, string>;
   socials?: Record<string, string>;
-  events?: Array<{ title?: string; date?: string; time?: string; signup_url?: string; signupUrl?: string }>;
+  events?: Array<{
+    title?: string;
+    date?: string;
+    time?: string;
+    location?: string;
+    location_name?: string;
+    locationName?: string;
+    location_address?: string;
+    locationAddress?: string;
+    signup_url?: string;
+    signupUrl?: string;
+  }>;
 };
 
 const AI_PROVIDER_ORDER = ['gemini', 'deepseek', 'anthropic', 'openai'] as const;
@@ -319,16 +330,24 @@ async function fetchCurrentSiteConfig(): Promise<SiteConfigData | null> {
   }
 
   try {
-    const [configRes, eventsRes] = await Promise.all([
+    const [configRes, initialEventsRes] = await Promise.all([
       fetch(`${supabaseUrl}/rest/v1/site_config?id=eq.1&select=announcement,links,socials`, {
         method: 'GET',
         headers,
       }),
-      fetch(`${supabaseUrl}/rest/v1/events?select=title,date,time,signup_url,order_index&order=order_index.asc`, {
+      fetch(`${supabaseUrl}/rest/v1/events?select=title,date,time,location,location_name,location_address,signup_url,order_index&order=order_index.asc`, {
         method: 'GET',
         headers,
       }),
     ]);
+    let eventsRes = initialEventsRes;
+
+    if (!eventsRes.ok) {
+      eventsRes = await fetch(`${supabaseUrl}/rest/v1/events?select=title,date,time,location,signup_url,order_index&order=order_index.asc`, {
+        method: 'GET',
+        headers,
+      });
+    }
 
     const configJson = configRes.ok ? await configRes.json() : [];
     const eventsJson = eventsRes.ok ? await eventsRes.json() : [];
@@ -375,7 +394,11 @@ function buildSiteContext(config: SiteConfigData | null) {
     .slice(0, 10)
     .map((event) => {
       const signup = trimUrl(event?.signup_url || event?.signupUrl);
-      return `- ${String(event?.title || 'Event').trim()} | ${String(event?.date || '').trim()} | ${String(event?.time || '').trim()}${signup ? ` | Signup: ${signup}` : ''}`;
+      const location = [
+        String(event?.location_name || event?.locationName || '').trim(),
+        String(event?.location_address || event?.locationAddress || event?.location || '').trim(),
+      ].filter(Boolean).join(', ');
+      return `- ${String(event?.title || 'Event').trim()} | ${String(event?.date || '').trim()} | ${String(event?.time || '').trim()}${location ? ` | Location: ${location}` : ''}${signup ? ` | Signup: ${signup}` : ''}`;
     });
 
   const sections = [

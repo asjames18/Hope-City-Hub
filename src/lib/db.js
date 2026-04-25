@@ -1,9 +1,12 @@
 import { supabase, isSupabaseConfigured } from './supabase';
 import { defaultConfig } from './defaultConfig';
 import { getPageConfigCacheKey, normalizePageConfig } from './siteConfig';
+import { formatEventLocation } from './events';
 
 const CONFIG_ID = 1;
 const CLICK_ACTIONS = ['connect', 'give', 'prayer', 'directions', 'announcement'];
+const EVENT_COLUMNS = 'id, title, date, time, location, location_name, location_address, signup_url, order_index';
+const LEGACY_EVENT_COLUMNS = 'id, title, date, time, location, signup_url, order_index';
 const ADMIN_AUTHZ_ERROR =
   'You are signed in, but not authorized for admin access. Contact your system administrator.';
 let supportsPublicPageConfigRpc = true;
@@ -20,6 +23,8 @@ function normalizeConfigPayload(row, eventRows) {
       date: e.date ?? '',
       time: e.time ?? '',
       location: e.location ?? '',
+      locationName: e.location_name ?? e.locationName ?? '',
+      locationAddress: e.location_address ?? e.locationAddress ?? e.location ?? '',
       signupUrl: e.signup_url ?? '',
     })),
   });
@@ -34,10 +39,18 @@ function isMissingRpc(error, functionName) {
 }
 
 async function fetchPageConfigFromTables() {
-  const [configRes, eventsRes] = await Promise.all([
+  const [configRes, initialEventsRes] = await Promise.all([
     supabase.from('site_config').select('announcement, links, socials').eq('id', CONFIG_ID).single(),
-    supabase.from('events').select('id, title, date, time, location, signup_url, order_index').order('order_index', { ascending: true }),
+    supabase.from('events').select(EVENT_COLUMNS).order('order_index', { ascending: true }),
   ]);
+  let eventsRes = initialEventsRes;
+
+  if (eventsRes.error) {
+    eventsRes = await supabase
+      .from('events')
+      .select(LEGACY_EVENT_COLUMNS)
+      .order('order_index', { ascending: true });
+  }
 
   if (configRes.error || eventsRes.error) {
     console.warn('Supabase fetch error:', configRes.error || eventsRes.error);
@@ -149,7 +162,9 @@ export async function savePageConfigToDb(config) {
         title: String(event?.title || ''),
         date: String(event?.date || ''),
         time: String(event?.time || ''),
-        location: String(event?.location || ''),
+        location: formatEventLocation(event),
+        location_name: String(event?.locationName || event?.location_name || ''),
+        location_address: String(event?.locationAddress || event?.location_address || event?.location || ''),
         signup_url: String(event?.signupUrl || event?.signup_url || ''),
         order_index: index,
       }))

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { buildCalendarLink, buildMapsLink, parseEventDateTime } from './events';
+import { buildCalendarLink, buildMapsLink, formatEventLocation, parseEventDateTime } from './events';
 
 describe('events utilities', () => {
   beforeEach(() => {
@@ -31,7 +31,8 @@ describe('events utilities', () => {
       title: 'Sunday Gathering',
       date: 'Apr 12',
       time: '10:00 AM',
-      location: '123 Church St, Sebring, FL',
+      locationName: 'Hope City Highlands',
+      locationAddress: '123 Church St, Sebring, FL',
       signupUrl: 'https://example.com/signup',
     });
 
@@ -39,8 +40,8 @@ describe('events utilities', () => {
     expect(calendarLink?.filename).toContain('sunday-gathering');
     expect(decodeURIComponent(calendarLink?.href || '')).toContain('BEGIN:VCALENDAR');
     expect(decodeURIComponent(calendarLink?.href || '')).toContain('SUMMARY:Sunday Gathering');
-    expect(decodeURIComponent(calendarLink?.href || '')).toContain('LOCATION:123 Church St\\, Sebring\\, FL');
-    expect(decodeURIComponent(calendarLink?.href || '')).toContain('Location: 123 Church St\\, Sebring\\, FL');
+    expect(decodeURIComponent(calendarLink?.href || '')).toContain('LOCATION:Hope City Highlands\\, 123 Church St\\, Sebring\\, FL');
+    expect(decodeURIComponent(calendarLink?.href || '')).toContain('Location: Hope City Highlands\\, 123 Church St\\, Sebring\\, FL');
   });
 
   it('omits calendar location when event location is blank', () => {
@@ -61,5 +62,13 @@ describe('events utilities', () => {
       'https://www.google.com/maps/search/?api=1&query=123%20Church%20St%2C%20Sebring%2C%20FL'
     );
     expect(buildMapsLink('')).toBe('');
+  });
+
+  it('formats event location from separate name and address fields', () => {
+    expect(formatEventLocation({
+      locationName: 'Hope City Highlands',
+      locationAddress: '123 Church St, Sebring, FL',
+    })).toBe('Hope City Highlands, 123 Church St, Sebring, FL');
+    expect(formatEventLocation({ location: 'Legacy Location' })).toBe('Legacy Location');
   });
 });
